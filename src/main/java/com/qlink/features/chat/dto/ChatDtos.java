@@ -1,0 +1,23 @@
+package com.qlink.features.chat.dto;
+import com.qlink.features.user.dto.PublicUserResponse;
+import jakarta.validation.constraints.*;
+import java.time.Instant;
+import java.util.*;
+public final class ChatDtos {
+ private ChatDtos() {}
+ public record PersonalSend(@NotNull UUID recipientId,@NotNull UUID clientMessageId,@Size(max=4000) String content, String type, UUID fileId, Long durationMs) {
+ public PersonalSend(UUID recipientId, UUID clientMessageId, String content) { this(recipientId,clientMessageId,content,null,null,null); }
+ }
+ public record Send(@NotNull UUID clientMessageId,@Size(max=4000) String content, String type, UUID fileId, Long durationMs) {
+ public Send(UUID clientMessageId, String content) { this(clientMessageId,content,null,null,null); }
+ }
+ public record Message(UUID id, UUID roomId, UUID senderId, UUID clientMessageId, String type, String content, Instant createdAt, String senderDisplayName, UUID fileId, Long durationMs, String audioContentType, Long audioSizeBytes, Attachment attachment) {}
+ public record Attachment(String originalName, String contentType, long sizeBytes) {}
+ public record Room(UUID id, UUID creatorId, PublicUserResponse participant, Instant lastMessageAt, Message lastMessage, String type, String name, String avatarUrl, int memberCount, String messageHistoryVisibility) {}
+ public record CreateGroup(String name, com.qlink.features.chat.enums.ChatRoomType type,
+ com.qlink.features.chat.enums.MessageHistoryVisibility messageHistoryVisibility, List<UUID> memberIds) {}
+ public record GroupMember(UUID id, String displayName, String username, String avatarUrl, String role, Instant joinedAt) {}
+ public record Lookup(boolean exists, Room room) {}
+ public record Sent(Room room, Message message) {}
+ public record History(List<Message> items, String nextCursor) {}
+}

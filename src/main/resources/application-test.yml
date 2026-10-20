@@ -1,0 +1,4 @@
+# Tests must supply a unique temporary directory, with no development fallback.
+app:
+  storage:
+    root-path: ${TEST_STORAGE_ROOT}

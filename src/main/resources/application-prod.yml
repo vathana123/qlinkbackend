@@ -1,0 +1,3 @@
+app:
+  storage:
+    root-path: ${STORAGE_ROOT:/var/lib/qlink/storage}
