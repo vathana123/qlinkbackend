@@ -43,3 +43,4 @@ secrets/
 
 # Private local file storage
 /storage/
+client_secret_*.json
