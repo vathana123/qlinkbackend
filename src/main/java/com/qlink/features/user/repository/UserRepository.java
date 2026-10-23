@@ -5,6 +5,8 @@ import org.springframework.data.domain.*;
 import jakarta.persistence.LockModeType;
 import java.util.*;
 public interface UserRepository extends JpaRepository<User, UUID> {
+    @Query(value = "SELECT COUNT(*) FROM users WHERE avatar_file_id = :id", nativeQuery = true)
+    long avatarReferences(UUID id);
     @Query("""
  select u from User u where u.id <> :viewer and u.status = com.qlink.features.user.enums.UserStatus.ACTIVE
  and (:target is null or u.id = :target) and exists (

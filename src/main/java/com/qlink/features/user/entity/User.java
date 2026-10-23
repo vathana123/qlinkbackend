@@ -21,6 +21,7 @@ public class User extends BaseEntity {
         if (normalized == null) throw com.qlink.features.user.service.SearchKeyword.invalid("Use an international phone number including country code");
         phoneNumber = normalized;
     }
+    private java.util.UUID avatarFileId;
     @Column(length = 2048) private String avatarUrl;
     @Enumerated(EnumType.STRING) @Column(nullable = false, length = 20)
     private UserStatus status = UserStatus.ACTIVE;
