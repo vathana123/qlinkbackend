@@ -78,6 +78,58 @@ class AuthIntegrationTest {
         when(verifier.verify(AuthProvider.GOOGLE, subject)).thenReturn(new ProviderIdentity(subject, "shared@example.com", "User", null, null));
         return data(postJson("signup", provider(subject), 201));
     }
+    @Test void profileValidationUniquenessAndIdentityProtection() throws Exception {
+        var first=signup(UUID.randomUUID().toString());
+        var second=signup(UUID.randomUUID().toString());
+        String token="Bearer "+first.get("accessToken").asText();
+        String name="p"+UUID.randomUUID().toString().replace("-", "").substring(0,20);
+        mvc.perform(patch("/api/v1/users/me").contentType("application/json").content("{}"))
+            .andExpect(status().isUnauthorized());
+        mvc.perform(patch("/api/v1/users/me").header("Authorization",token).contentType("application/json")
+            .content(body(Map.of("displayName","  My Name  ","username",name.toUpperCase()))))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.data.displayName").value("My Name"))
+            .andExpect(jsonPath("$.data.username").value(name));
+        mvc.perform(patch("/api/v1/users/me").header("Authorization","Bearer "+second.get("accessToken").asText())
+            .contentType("application/json").content(body(Map.of("username",name.toUpperCase()))))
+            .andExpect(status().isConflict());
+        for(var payload:List.of(Map.of("displayName","   "),Map.of("username","bad name"),Map.of("username","admin"))) {
+            mvc.perform(patch("/api/v1/users/me").header("Authorization",token).contentType("application/json").content(body(payload)))
+                .andExpect(status().isBadRequest());
+        }
+        mvc.perform(patch("/api/v1/users/me").header("Authorization",token).contentType("application/json")
+            .content(body(Map.of("displayName","Changed"))))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.data.username").value(name))
+            .andExpect(jsonPath("$.data.email").value("shared@example.com"));
+        mvc.perform(get("/api/v1/auth/me").header("Authorization","Bearer "+second.get("accessToken").asText()))
+            .andExpect(jsonPath("$.data.displayName").value("User"));
+    }
+    @Test void profileAvatarReplacementReadAuthorizationAndRemoval() throws Exception {
+        String subject=UUID.randomUUID().toString();
+        var account=signup(subject);
+        String token="Bearer "+account.get("accessToken").asText();
+        byte[] png=Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV1sAAAAASUVORK5CYII=");
+        var file=new org.springframework.mock.web.MockMultipartFile("file","avatar.png","image/png",png);
+        mvc.perform(multipart("/api/v1/users/me/avatar").file(file).with(r -> {r.setMethod("PUT");return r;}))
+            .andExpect(status().isUnauthorized());
+        var saved=data(mvc.perform(multipart("/api/v1/users/me/avatar").file(file).header("Authorization",token)
+            .with(r -> {r.setMethod("PUT");return r;})).andExpect(status().isOk()).andReturn());
+        String url=saved.get("avatarUrl").asText();
+        mvc.perform(get(url)).andExpect(status().isUnauthorized());
+        var other=signup(UUID.randomUUID().toString());
+        mvc.perform(get(url).header("Authorization","Bearer "+other.get("accessToken").asText())).andExpect(status().isOk());
+        mvc.perform(delete(url.replace("/download", "")).header("Authorization",token)).andExpect(status().isBadRequest());
+        var invalid=new org.springframework.mock.web.MockMultipartFile("file","bad.txt","text/plain","not an image".getBytes());
+        mvc.perform(multipart("/api/v1/users/me/avatar").file(invalid).header("Authorization",token)
+            .with(r -> {r.setMethod("PUT");return r;})).andExpect(status().isBadRequest());
+        var replaced=data(mvc.perform(multipart("/api/v1/users/me/avatar").file(file).header("Authorization",token)
+            .with(r -> {r.setMethod("PUT");return r;})).andExpect(status().isOk()).andReturn());
+        mvc.perform(get(url).header("Authorization",token)).andExpect(status().isNotFound());
+        var signin=data(postJson("signin",provider(subject),200));
+        assertThat(signin.get("user").get("avatarUrl").asText()).isEqualTo(replaced.get("avatarUrl").asText());
+        mvc.perform(delete("/api/v1/users/me/avatar").header("Authorization",token)).andExpect(status().isOk())
+            .andExpect(jsonPath("$.data.avatarUrl").doesNotExist());
+        mvc.perform(get(replaced.get("avatarUrl").asText()).header("Authorization",token)).andExpect(status().isNotFound());
+    }
     @Test void registrationSigninRotationReuseAndSignout() throws Exception {
         String subject = UUID.randomUUID().toString();
         JsonNode registered = signup(subject);

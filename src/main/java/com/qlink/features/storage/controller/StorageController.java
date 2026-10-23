@@ -43,11 +43,11 @@ public class StorageController {
         return ResponseEntity.status(HttpStatus.CREATED).cacheControl(CacheControl.noStore())
             .body(ApiResponse.ok("File uploaded",service.upload(jwt,file,category,voice)));
     }
-    @GetMapping("/{fileId}") @Operation(summary="Get private file metadata (owner or authorized message participant)")
+    @GetMapping("/{fileId}") @Operation(summary="Get private file metadata (owner, authorized message participant, or authenticated profile-avatar viewer)")
     public ResponseEntity<ApiResponse<StoredFileResponse>> metadata(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID fileId) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(ApiResponse.ok("File",service.metadata(jwt,fileId)));
     }
-    @GetMapping("/{fileId}/download") @Operation(summary="Download a private file as an attachment (owner or authorized message participant)")
+    @GetMapping("/{fileId}/download") @Operation(summary="Download a private file as an attachment (owner, authorized message participant, or authenticated profile-avatar viewer)")
     @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode="200",description="Private attachment; Content-Type and Content-Length reflect stored metadata",
         content=@io.swagger.v3.oas.annotations.media.Content(mediaType="application/octet-stream",
             schema=@io.swagger.v3.oas.annotations.media.Schema(type="string",format="binary")))

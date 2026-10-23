@@ -13,7 +13,21 @@ import java.util.UUID;
 @RestController @RequestMapping("/api/v1/users") @SecurityRequirement(name="bearerAuth")
 public class UserController {
     private final DiscoveryService service;
-    public UserController(DiscoveryService service) { this.service=service; }
+    private final com.qlink.features.user.service.ProfileService profile;
+    public UserController(DiscoveryService service, com.qlink.features.user.service.ProfileService profile) { this.service=service; this.profile=profile; }
+    @PatchMapping("/me") @Operation(summary="Update your display name and/or username", description="Null or omitted fields stay unchanged. Usernames are case-insensitively unique; conflicts return 409.")
+    public ApiResponse<UserResponse> profile(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody ProfileRequest request) {
+        return ApiResponse.ok("Profile saved",profile.update(jwt,request));
+    }
+    @PutMapping(value="/me/avatar", consumes="multipart/form-data")
+    @Operation(summary="Replace your avatar", description="Multipart file: JPEG, PNG, GIF or WebP. Existing storage content and size validation applies. Avatars are visible to authenticated users.")
+    public ApiResponse<UserResponse> avatar(@AuthenticationPrincipal Jwt jwt, @RequestPart("file") org.springframework.web.multipart.MultipartFile file) {
+        return ApiResponse.ok("Avatar saved",profile.avatar(jwt,file));
+    }
+    @DeleteMapping("/me/avatar") @Operation(summary="Remove your avatar")
+    public ApiResponse<UserResponse> removeAvatar(@AuthenticationPrincipal Jwt jwt) {
+        return ApiResponse.ok("Avatar removed",profile.avatar(jwt,null));
+    }
     @GetMapping("/search") @Operation(summary="Find users by name, username, exact email or international phone number")
     public ApiResponse<Page<PublicUserResponse>> search(@AuthenticationPrincipal Jwt jwt, @RequestParam String q, jakarta.servlet.http.HttpServletResponse response,
             @RequestParam(defaultValue="0") int page, @RequestParam(defaultValue="20") int size) {

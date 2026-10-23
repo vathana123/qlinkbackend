@@ -8,8 +8,14 @@ import org.springframework.security.oauth2.server.resource.authentication.JwtAut
 import java.util.*;
 
 @Configuration
-@EnableJpaAuditing
+@EnableJpaAuditing(dateTimeProviderRef = "auditDateTimeProvider")
 public class JpaAuditingConfig {
+    @Bean
+    org.springframework.data.auditing.DateTimeProvider auditDateTimeProvider() {
+        // MySQL DATETIME(6) rounds nanoseconds; normalize before both persistence and response mapping.
+        return () -> Optional.of(java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS));
+    }
+
     @Bean
     AuditorAware<UUID> auditorAware() {
         return () -> {

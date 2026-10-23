@@ -34,6 +34,8 @@ public class VoiceFiles {
 
     public static final int MAX_BYTES=4_000_000;
 
+    private final com.qlink.features.user.repository.UserRepository users;
+
     private final StoredFileRepository files;
 
     private final FileStorageProvider provider;
@@ -46,7 +48,8 @@ public class VoiceFiles {
 
     public VoiceFiles(StoredFileRepository files, FileStorageProvider provider, ChatMessageRepository messages,
 
-                      ChatRoomRepository rooms, ChatMemberRepository members) {
+                      ChatRoomRepository rooms, ChatMemberRepository members, com.qlink.features.user.repository.UserRepository users) {
+        this.users=users;
 
         this.files=files; this.provider=provider; this.messages=messages; this.rooms=rooms; this.members=members;
 
@@ -89,7 +92,7 @@ public class VoiceFiles {
         var file=files.lockIncludingDeleted(id).orElseThrow(StorageErrors::missing);
         if (!actor.equals(file.getUploadedBy()) || file.getDeletedAt()!=null || file.getStatus()!=StoredFileStatus.AVAILABLE)
             throw StorageErrors.missing();
-        if (file.isVoiceRecording() || messages.includingDeletedByFileId(id).isPresent())
+        if (users.avatarReferences(id)>0 || file.isVoiceRecording() || messages.includingDeletedByFileId(id).isPresent())
             throw StorageErrors.invalid("File already attached or reserved for voice");
         if ((type==MessageType.IMAGE)!=(file.getCategory()==FileCategory.IMAGE))
             throw StorageErrors.invalid("Message type does not match file");
@@ -164,6 +167,7 @@ public class VoiceFiles {
 
     public void requireRead(UUID actor, StoredFile file) {
 
+        if (users.avatarReferences(file.getId())>0) return; // Avatars are visible to authenticated users.
         var attached=messages.includingDeletedByFileId(file.getId());
 
         if(attached.isEmpty()) {
@@ -192,7 +196,7 @@ public class VoiceFiles {
 
     public void requireUnattached(UUID id) {
 
-        if(messages.includingDeletedByFileId(id).isPresent()) throw StorageErrors.invalid("Attached files cannot be deleted independently");
+        if(users.avatarReferences(id)>0 || messages.includingDeletedByFileId(id).isPresent()) throw StorageErrors.invalid("Attached files cannot be deleted independently");
 
     }
 
