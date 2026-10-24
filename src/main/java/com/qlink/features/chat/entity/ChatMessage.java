@@ -14,6 +14,11 @@ public class ChatMessage extends BaseEntity { @Column(nullable=false,columnDefin
  @Enumerated(EnumType.STRING) @Column(nullable=false,length=20) private MessageType type = MessageType.TEXT;
  @Column(nullable=false,columnDefinition="text") private String content;
  @Column(columnDefinition="binary(16)") private UUID fileId;
+ private UUID replyToId;
+ private Instant editedAt;
+ private Instant removedAt;
+ private UUID removedBy;
+ private long revision;
  private Long durationMs;
  private String audioContentType;
  private Long audioSizeBytes;

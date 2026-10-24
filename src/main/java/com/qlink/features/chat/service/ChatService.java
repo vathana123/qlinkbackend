@@ -25,6 +25,7 @@ import java.util.*;
 @Transactional(readOnly=true)
 public class ChatService {
  @jakarta.persistence.PersistenceContext private jakarta.persistence.EntityManager entityManager;
+ @org.springframework.beans.factory.annotation.Autowired private MessageHiddenRepository hidden;
  private final ChatRoomRepository rooms; private final ChatMemberRepository members;
  private final ChatMessageRepository messages; private final UserRepository users;
  private final UserService current; private final DiscoveryService discovery;
@@ -72,9 +73,77 @@ public class ChatService {
   return room.getType()!=ChatRoomType.PERSONAL && room.getMessageHistoryVisibility()==MessageHistoryVisibility.VIEW_AFTER_JOIN
    ? membership(viewer,room.getId()).getJoinedAt() : null;
  }
- public Message messageDto(ChatMessage m) {
-  return new Message(m.getId(),m.getRoomId(),m.getSenderId(),m.getClientMessageId(),m.getType().name(),m.getContent(),m.getCreatedAt().truncatedTo(java.time.temporal.ChronoUnit.MICROS),
-   users.findById(m.getSenderId()).map(u -> u.getDisplayName()).orElse("Unavailable user"),m.getFileId(),m.getDurationMs(),m.getAudioContentType(),m.getAudioSizeBytes(),voiceFiles.describe(m));
+ public Message messageDto(ChatMessage m) { return messageDto(m.getSenderId(),m); }
+ public boolean isHidden(UUID viewer,UUID id) { return hidden.existsByMessageIdAndUserId(id,viewer); }
+ private boolean canDelete(UUID viewer,ChatMessage m) {
+  if(m.getSenderId().equals(viewer)) return true;
+  var room=rooms.findById(m.getRoomId()).orElseThrow();
+  if(room.getType()==ChatRoomType.PERSONAL) return false;
+  var role=membership(viewer,room.getId()).getRole();
+  var target=members.findByRoomId(room.getId()).stream().filter(x -> x.getUserId().equals(m.getSenderId())).findFirst();
+  return role==ChatRoomMemberRole.OWNER || (role==ChatRoomMemberRole.CO_OWNER &&
+    (target.isEmpty() || target.get().getRole()==ChatRoomMemberRole.MEMBER));
+ }
+ public Message messageDto(UUID viewer,ChatMessage m) {
+  boolean hide=isHidden(viewer,m.getId()), removed=m.getRemovedAt()!=null || m.getDeletedAt()!=null;
+  Reply reply=null;
+  if(m.getReplyToId()!=null && !hide && !removed) {
+   var original=messages.findById(m.getReplyToId()).orElse(null);
+   var room=rooms.findById(m.getRoomId()).orElseThrow();
+   var since=historyStart(viewer,room);
+   boolean unavailable=original==null || !original.getRoomId().equals(m.getRoomId()) || original.getRemovedAt()!=null ||
+    isHidden(viewer,original.getId()) || (since!=null && original.getCreatedAt().isBefore(since));
+   reply=unavailable ? new Reply(m.getReplyToId(),null,null,"Message unavailable",true) :
+    new Reply(original.getId(),users.findById(original.getSenderId()).map(u -> u.getDisplayName()).orElse("Unavailable user"),
+     original.getType().name(),original.getType()==MessageType.TEXT?original.getContent():original.getType().name(),false);
+  }
+  return new Message(m.getId(),m.getRoomId(),m.getSenderId(),m.getClientMessageId(),m.getType().name(),hide||removed?"":m.getContent(),m.getCreatedAt().truncatedTo(java.time.temporal.ChronoUnit.MICROS),
+   users.findById(m.getSenderId()).map(u -> u.getDisplayName()).orElse("Unavailable user"),hide||removed?null:m.getFileId(),hide||removed?null:m.getDurationMs(),hide||removed?null:m.getAudioContentType(),hide||removed?null:m.getAudioSizeBytes(),hide||removed?null:voiceFiles.describe(m),
+   m.getReplyToId(),reply,m.getEditedAt(),m.getRemovedAt(),m.getRevision(),hide,!hide&&!removed&&canDelete(viewer,m));
+ }
+ private ChatMessage visibleMessage(UUID viewer,ChatRoom room,UUID id) {
+  var m=messages.findById(id).orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND,"MESSAGE_NOT_FOUND","Message unavailable"));
+  var since=historyStart(viewer,room);
+  if(!m.getRoomId().equals(room.getId()) || (since!=null && m.getCreatedAt().isBefore(since)))
+   throw new ApiException(HttpStatus.NOT_FOUND,"MESSAGE_NOT_FOUND","Message unavailable");
+  return m;
+ }
+ private void reply(UUID viewer,ChatRoom room,ChatMessage message,UUID id) {
+  if(id==null) return;
+  var original=visibleMessage(viewer,room,id);
+  if(original.getRemovedAt()!=null || isHidden(viewer,id)) throw bad("Reply message unavailable");
+  message.setReplyToId(id);
+ }
+ @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+ public Message edit(UUID viewer,UUID roomId,UUID id,Edit request) {
+  users.lockById(viewer).orElseThrow(() -> bad("User unavailable"));
+  rooms.lockById(roomId).orElseThrow(() -> bad("Room unavailable"));
+  var room=requireRoom(viewer,roomId);var m=visibleMessage(viewer,room,id);
+  if(room.getType()!=ChatRoomType.PERSONAL && membership(viewer,roomId).getRole()==ChatRoomMemberRole.MEMBER && !room.isMembersCanSend())
+   throw new ApiException(HttpStatus.FORBIDDEN,"GROUP_PERMISSION_DENIED","Members cannot edit messages in this group");
+  if(!m.getSenderId().equals(viewer)) throw new ApiException(HttpStatus.FORBIDDEN,"MESSAGE_ACCESS_DENIED","Only the sender can edit a message");
+  if(m.getRemovedAt()!=null || isHidden(viewer,id) || m.getType()!=MessageType.TEXT) throw bad("Message cannot be edited");
+  if(request.content()==null || request.content().isBlank() || request.content().length()>4000) throw bad("Message must contain 1–4000 characters");
+  if(request.revision()==null || request.revision()!=m.getRevision()) throw new ApiException(HttpStatus.CONFLICT,"STALE_MESSAGE","Message changed; refresh before editing");
+  m.setContent(request.content());m.setEditedAt(Instant.now());m.setRevision(m.getRevision()+1);messages.flush();
+  events.publishEvent(new com.qlink.features.chat.realtime.MessageCommitted(id,"MESSAGE_UPDATED",null));
+  return messageDto(viewer,m);
+ }
+ @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+ public Message delete(UUID viewer,UUID roomId,UUID id,boolean everyone) {
+  users.lockById(viewer).orElseThrow(() -> bad("User unavailable"));
+  rooms.lockById(roomId).orElseThrow(() -> bad("Room unavailable"));
+  var room=requireRoom(viewer,roomId);var m=visibleMessage(viewer,room,id);
+  if(everyone) {
+   if(!canDelete(viewer,m)) throw new ApiException(HttpStatus.FORBIDDEN,"MESSAGE_ACCESS_DENIED","You cannot delete this message for everyone");
+   if(m.getRemovedAt()==null) {
+    m.setContent("");m.setRemovedAt(Instant.now());m.setRemovedBy(viewer);m.setRevision(m.getRevision()+1);messages.flush();
+   }
+  } else if(!isHidden(viewer,id)) {
+   var h=new MessageHidden();h.setMessageId(id);h.setUserId(viewer);hidden.saveAndFlush(h);
+  }
+  events.publishEvent(new com.qlink.features.chat.realtime.MessageCommitted(id,everyone?"MESSAGE_UPDATED":"MESSAGE_HIDDEN",everyone?null:viewer));
+  return messageDto(viewer,m);
  }
  private Room roomDto(UUID viewer,ChatRoom room) {
   PublicUserResponse profile=null;
@@ -82,8 +151,8 @@ public class ChatService {
    UUID other=partner(viewer,room.getId());
    profile=users.findById(other).map(userMapper::toPublic).orElse(new PublicUserResponse(other,null,"Unavailable user",null));
   }
-  var latest=messages.history(room.getId(),historyStart(viewer,room),null,null,PageRequest.of(0,1));
-  Message last=latest.isEmpty()?null:messageDto(latest.get(0));
+  var latest=messages.visibleLatest(room.getId(),viewer,historyStart(viewer,room),PageRequest.of(0,1));
+  Message last=latest.isEmpty()?null:messageDto(viewer,latest.get(0));
   return new Room(room.getId(),room.getCreatorId(),profile,room.getType()==ChatRoomType.PERSONAL?room.getLastMessageAt():(last==null?null:last.createdAt()),last,
    room.getType().name(),room.getGroupName(),room.getAvatarFileId()==null?null:"/api/v1/storage/files/"+room.getAvatarFileId()+"/download",
    members.findByRoomId(room.getId()).size(),room.getMessageHistoryVisibility().name(),room.getDescription(),
@@ -156,17 +225,17 @@ public class ChatService {
    ChatMessage last=visible.get(visible.size()-1);
    next=Base64.getUrlEncoder().withoutPadding().encodeToString((roomId+"|"+last.getCreatedAt()+"|"+last.getId()).getBytes(StandardCharsets.UTF_8));
   }
-  return new History(visible.stream().map(this::messageDto).toList(),next);
+  return new History(visible.stream().map(m -> messageDto(viewer,m)).toList(),next);
  }
  @Transactional(propagation=org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
  public Sent sendPersonal(UUID sender,PersonalSend request) {
-  return send(sender,request.recipientId(),null,request.clientMessageId(),request.content(),request.type(),request.fileId(),request.durationMs());
+  return send(sender,request.recipientId(),null,request.clientMessageId(),request.content(),request.type(),request.fileId(),request.durationMs(),request.replyToId());
  }
  @Transactional(propagation=org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
  public Sent sendExisting(UUID sender,UUID roomId,Send request) {
-  return send(sender,null,roomId,request.clientMessageId(),request.content(),request.type(),request.fileId(),request.durationMs());
+  return send(sender,null,roomId,request.clientMessageId(),request.content(),request.type(),request.fileId(),request.durationMs(),request.replyToId());
  }
- private Sent send(UUID sender,UUID recipient,UUID requestedRoom,UUID key,String content,String type,UUID fileId,Long durationMs) {
+ private Sent send(UUID sender,UUID recipient,UUID requestedRoom,UUID key,String content,String type,UUID fileId,Long durationMs,UUID replyToId) {
   boolean voice="VOICE".equals(type);
   boolean attachment="IMAGE".equals(type) || "FILE".equals(type);
   MessageType messageType=type==null?MessageType.TEXT:parseType(type);
@@ -176,7 +245,7 @@ public class ChatService {
   if(!voice && !attachment && (key==null || content==null || content.isBlank() || content.length()>4000)) throw bad("Message must contain 1–4000 characters");
   // Each retry starts a new transaction; never continue in a transaction marked rollback-only.
   for(int attempt=0;attempt<3;attempt++) {
-   try { return writes.execute(status -> persist(sender,recipient,requestedRoom,key,voice || attachment?"":content,fileId,durationMs,messageType)); }
+   try { return writes.execute(status -> persist(sender,recipient,requestedRoom,key,voice || attachment?"":content,fileId,durationMs,messageType,replyToId)); }
    catch(DataIntegrityViolationException | TransientDataAccessException ex) {
     if(attempt==2) throw new ApiException(HttpStatus.CONFLICT,"SEND_CONFLICT","Concurrent change; retry with the same message identifier");
    }
@@ -186,7 +255,7 @@ public class ChatService {
  private MessageType parseType(String type) {
   try { return MessageType.valueOf(type); } catch(IllegalArgumentException ex) { throw bad("Unsupported message type"); }
  }
- private Sent persist(UUID sender,UUID recipient,UUID requestedRoom,UUID key,String content,UUID fileId,Long durationMs,MessageType messageType) {
+ private Sent persist(UUID sender,UUID recipient,UUID requestedRoom,UUID key,String content,UUID fileId,Long durationMs,MessageType messageType,UUID replyToId) {
   if(requestedRoom!=null && rooms.findById(requestedRoom).map(r -> r.getType()!=ChatRoomType.PERSONAL).orElse(false)) {
    users.lockById(sender).orElseThrow();
    var room=rooms.lockById(requestedRoom).orElseThrow();
@@ -201,15 +270,16 @@ public class ChatService {
     if(room.getMessageHistoryVisibility()==MessageHistoryVisibility.VIEW_AFTER_JOIN &&
        message.getCreatedAt().isBefore(senderMembership.getJoinedAt()))
      throw new ApiException(HttpStatus.FORBIDDEN,"MESSAGE_HISTORY_HIDDEN","Message is outside your visible history");
-    if(message.getDeletedAt()!=null || !message.getRoomId().equals(requestedRoom) || !message.getContent().equals(content) || !Objects.equals(message.getFileId(),fileId) || (message.getType()!=messageType || (messageType==MessageType.VOICE && Math.abs(message.getDurationMs()-durationMs)>1000))) throw conflict();
-    return new Sent(roomDto(sender,room),messageDto(message));
+    if(message.getDeletedAt()!=null || message.getRemovedAt()!=null || !Objects.equals(message.getReplyToId(),replyToId) || !message.getRoomId().equals(requestedRoom) || !message.getContent().equals(content) || !Objects.equals(message.getFileId(),fileId) || (message.getType()!=messageType || (messageType==MessageType.VOICE && Math.abs(message.getDurationMs()-durationMs)>1000))) throw conflict();
+    return new Sent(roomDto(sender,room),messageDto(sender,message));
    }
    var message=new ChatMessage();message.setRoomId(requestedRoom);message.setSenderId(sender);message.setClientMessageId(key);message.setContent(content);
    if(messageType==MessageType.VOICE) voiceFiles.attach(sender,message,fileId,durationMs);
    else if(fileId!=null) voiceFiles.attachFile(sender,message,fileId,messageType);
+   reply(sender,room,message,replyToId);
    messages.saveAndFlush(message);room.setLastMessageAt(message.getCreatedAt());rooms.saveAndFlush(room);
    events.publishEvent(new com.qlink.features.chat.realtime.MessageCommitted(message.getId()));
-   return new Sent(roomDto(sender,room),messageDto(message));
+   return new Sent(roomDto(sender,room),messageDto(sender,message));
   }
   UUID other=recipient;
   if(requestedRoom!=null) { requireRoom(sender,requestedRoom); other=partner(sender,requestedRoom); }
@@ -223,8 +293,8 @@ public class ChatService {
   var prior=messages.previous(sender,key);
   if(prior.isPresent()) {
    ChatMessage message=prior.get();
-   if(message.getDeletedAt()!=null || room==null || !message.getRoomId().equals(room.getId()) || !message.getContent().equals(content) || !Objects.equals(message.getFileId(),fileId) || (message.getType()!=messageType || (messageType==MessageType.VOICE && Math.abs(message.getDurationMs()-durationMs)>1000))) throw conflict();
-   return new Sent(roomDto(sender,room),messageDto(message));
+   if(message.getDeletedAt()!=null || message.getRemovedAt()!=null || !Objects.equals(message.getReplyToId(),replyToId) || room==null || !message.getRoomId().equals(room.getId()) || !message.getContent().equals(content) || !Objects.equals(message.getFileId(),fileId) || (message.getType()!=messageType || (messageType==MessageType.VOICE && Math.abs(message.getDurationMs()-durationMs)>1000))) throw conflict();
+   return new Sent(roomDto(sender,room),messageDto(sender,message));
   }
   if(room==null) {
    room=new ChatRoom(); room.setCreatorId(sender); room.setPersonalPairKey(pairKey(sender,other));
@@ -234,13 +304,15 @@ public class ChatService {
    }
    members.flush();
   }
+  rooms.lockById(room.getId()).orElseThrow();
   partner(sender,room.getId());
   ChatMessage message=new ChatMessage(); message.setRoomId(room.getId()); message.setSenderId(sender);
   message.setClientMessageId(key); message.setContent(content); if(messageType==MessageType.VOICE) voiceFiles.attach(sender,message,fileId,durationMs);
    else if(fileId!=null) voiceFiles.attachFile(sender,message,fileId,messageType);
+   reply(sender,room,message,replyToId);
    messages.saveAndFlush(message);
   room.setLastMessageAt(message.getCreatedAt()); rooms.saveAndFlush(room);
   events.publishEvent(new com.qlink.features.chat.realtime.MessageCommitted(message.getId()));
-  return new Sent(roomDto(sender,room),messageDto(message));
+  return new Sent(roomDto(sender,room),messageDto(sender,message));
  }
 }

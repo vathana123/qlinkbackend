@@ -26,6 +26,14 @@ public class ChatController {
  public ApiResponse<java.util.List<GroupMember>> members(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID roomId) {
   return ApiResponse.ok("Members",service.groupMembers(viewer(jwt),roomId));
  }
+ @PatchMapping("/rooms/{roomId}/messages/{id}")
+ public ApiResponse<Message> edit(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID roomId,@PathVariable UUID id,@Valid @RequestBody Edit request) {
+  return ApiResponse.ok("Message edited",service.edit(viewer(jwt),roomId,id,request));
+ }
+ @DeleteMapping("/rooms/{roomId}/messages/{id}")
+ public ApiResponse<Message> delete(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID roomId,@PathVariable UUID id,@RequestParam(defaultValue="false") boolean everyone) {
+  return ApiResponse.ok("Message deleted",service.delete(viewer(jwt),roomId,id,everyone));
+ }
  private UUID viewer(Jwt jwt) { return UUID.fromString(jwt.getSubject()); }
  @GetMapping("/personal/with/{userId}") @Operation(summary="Find a personal room without creating it")
  public ApiResponse<Lookup> lookup(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID userId) {
