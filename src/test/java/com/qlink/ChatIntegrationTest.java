@@ -484,7 +484,11 @@ class ChatIntegrationTest {
             var sent=data(request(a,"POST","/api/v1/chat/personal/messages",payload,200));
             assertThat(sent.get("message").get("type").asText()).isEqualTo("VOICE");
             assertThat(sent.get("message").get("durationMs").asLong()).isEqualTo(1000);
-            assertThat(wire.event().get("message")).isEqualTo(sent.get("message"));
+            var received=wire.event().get("message");
+            assertThat(received.get("canDeleteForEveryone").asBoolean()).isFalse();
+            assertThat(sent.at("/message/canDeleteForEveryone").asBoolean()).isTrue();
+            for(String field:List.of("id","type","fileId","content","durationMs","audioContentType","audioSizeBytes","revision"))
+                assertThat(received.get(field)).isEqualTo(sent.get("message").get(field));
             assertThat(data(request(a,"POST","/api/v1/chat/personal/messages",payload,200)).get("message")).isEqualTo(sent.get("message"));
             wire.quiet();
             request(b,"GET","/api/v1/storage/files/"+file+"/download",null,200);
@@ -727,5 +731,122 @@ class ChatIntegrationTest {
         request(member,"GET","/api/v1/storage/files/"+second+"/download",null,404);
         request(owner,"DELETE",path+"/avatar",null,200);
         request(owner,"GET","/api/v1/storage/files/"+second+"/download",null,404);
+    }
+
+    @Test void messageReplyEditDeleteAndPrivateHidingPersist() throws Exception {
+        var a=account();var b=account();var outsider=account();
+        var sent=send(a,b,key(),"Original");String room=sent.get("room").get("id").asText();
+        String base="/api/v1/chat/rooms/"+room+"/messages", id=sent.get("message").get("id").asText();
+        var reply=data(request(b,"POST",base,Map.of("clientMessageId",key(),"content","Reply","replyToId",id),200)).get("message");
+        assertThat(reply.get("reply").get("content").asText()).isEqualTo("Original");
+        request(outsider,"PATCH",base+"/"+id,Map.of("content","Intrude","revision",0),403);
+        request(b,"PATCH",base+"/"+id,Map.of("content","Intrude","revision",0),403);
+        request(a,"PATCH",base+"/"+id,Map.of("content"," ","revision",0),400);
+        var edited=data(request(a,"PATCH",base+"/"+id,Map.of("content","Edited","revision",0),200));
+        assertThat(edited.get("revision").asInt()).isEqualTo(1);
+        assertThat(edited.get("editedAt").isNull()).isFalse();
+        request(a,"PATCH",base+"/"+id,Map.of("content","Stale","revision",0),409);
+        request(b,"DELETE",base+"/"+id+"?everyone=true",null,403);
+        request(b,"DELETE",base+"/"+id,null,200);
+        request(b,"DELETE",base+"/"+id,null,200);
+        var hidden=data(request(b,"GET",base,null,200)).get("items");
+        assertThat(hidden.get(0).get("reply").get("unavailable").asBoolean()).isTrue();
+        assertThat(hidden.get(1).get("hidden").asBoolean()).isTrue();
+        assertThat(hidden.get(1).get("content").asText()).isEmpty();
+        assertThat(data(request(a,"GET",base,null,200)).get("items").get(1).get("content").asText()).isEqualTo("Edited");
+        request(b,"POST",base,Map.of("clientMessageId",key(),"content","Hidden reply","replyToId",id),400);
+        request(a,"DELETE",base+"/"+id+"?everyone=true",null,200);
+        var history=data(request(a,"GET",base,null,200)).get("items");
+        assertThat(history.get(0).get("reply").get("unavailable").asBoolean()).isTrue();
+        assertThat(history.get(1).get("removedAt").isNull()).isFalse();
+        assertThat(history.get(1).get("content").asText()).isEmpty();
+        request(a,"PATCH",base+"/"+id,Map.of("content","Restore","revision",2),400);
+        var other=send(a,outsider,key(),"Other room").get("message").get("id").asText();
+        request(a,"POST",base,Map.of("clientMessageId",key(),"content","Cross-room","replyToId",other),404);
+    }
+
+    @Test void groupModerationAndReplyHistoryBoundaries() throws Exception {
+        var owner=account();var co=account();var member=account();var peer=account();
+        String room=managedGroup(owner,co), group="/api/v1/chat/groups/"+room, base="/api/v1/chat/rooms/"+room+"/messages";
+        request(owner,"POST",group+"/members",Map.of("memberIds",List.of(member.id(),peer.id())),200);
+        request(owner,"PATCH",group+"/members/"+co.id()+"/role",Map.of("role","CO_OWNER"),200);
+        request(owner,"PATCH",group+"/members/"+peer.id()+"/role",Map.of("role","CO_OWNER"),200);
+        var ownerId=data(request(owner,"POST",base,Map.of("clientMessageId",key(),"content","Owner"),200)).get("message").get("id").asText();
+        var peerId=data(request(peer,"POST",base,Map.of("clientMessageId",key(),"content","Peer"),200)).get("message").get("id").asText();
+        var memberId=data(request(member,"POST",base,Map.of("clientMessageId",key(),"content","Member"),200)).get("message").get("id").asText();
+        request(co,"DELETE",base+"/"+ownerId+"?everyone=true",null,403);
+        request(co,"DELETE",base+"/"+peerId+"?everyone=true",null,403);
+        request(member,"DELETE",base+"/"+peerId+"?everyone=true",null,403);
+        request(co,"DELETE",base+"/"+memberId+"?everyone=true",null,200);
+        request(owner,"DELETE",base+"/"+peerId+"?everyone=true",null,200);
+        jdbc.update("update chat_room_members set joined_at=UTC_TIMESTAMP(6) where room_id=UUID_TO_BIN(?) and user_id=UUID_TO_BIN(?) and deleted_at is null",room,member.id());
+        request(member,"POST",base,Map.of("clientMessageId",key(),"content","Hidden","replyToId",ownerId),404);
+        request(member,"DELETE",base+"/"+ownerId,null,404);
+        request(member,"PATCH",base+"/"+memberId,Map.of("content","Hidden","revision",1),404);
+        request(owner,"POST",base,Map.of("clientMessageId",key(),"content","Visible reply","replyToId",ownerId),200);
+        var preview=data(request(member,"GET",base,null,200)).get("items").get(0).get("reply");
+        assertThat(preview.get("unavailable").asBoolean()).isTrue();
+        assertThat(preview.get("senderDisplayName").isNull()).isTrue();
+    }
+
+    @Test void actionsSynchronizeTwoDevicesAndHideOnlyRequestingAccount() throws Exception {
+        var a=account();var b=account();
+        var sent=send(a,b,key(),"Original");String room=sent.get("room").get("id").asText(), id=sent.get("message").get("id").asText();
+        String path="/api/v1/chat/rooms/"+room+"/messages/"+id;
+        try(var first=new Wire(a.token());var second=new Wire(a.token());var recipient=new Wire(b.token())) {
+            first.subscribe(a);second.subscribe(a);recipient.subscribe(b);
+            request(a,"PATCH",path,Map.of("content","Changed","revision",0),200);
+            for(var wire:List.of(first,second,recipient)) {
+                var e=wire.event();assertThat(e.get("type").asText()).isEqualTo("MESSAGE_UPDATED");
+                assertThat(e.get("message").get("content").asText()).isEqualTo("Changed");
+            }
+            request(a,"DELETE",path,null,200);
+            for(var wire:List.of(first,second)) assertThat(wire.event().get("message").get("hidden").asBoolean()).isTrue();
+            recipient.quiet();
+            request(a,"DELETE",path+"?everyone=true",null,200);
+            first.event();second.event();
+            assertThat(recipient.event().get("message").get("removedAt").isNull()).isFalse();
+        }
+        var reloaded=data(request(a,"GET","/api/v1/chat/rooms/"+room+"/messages",null,200)).get("items").get(0);
+        assertThat(reloaded.get("hidden").asBoolean()).isTrue();
+    }
+
+    @Test void concurrentEditsHaveExactlyOneWinner() throws Exception {
+        var a=account();var b=account();var sent=send(a,b,key(),"Original");
+        String path="/api/v1/chat/rooms/"+sent.get("room").get("id").asText()+"/messages/"+sent.get("message").get("id").asText();
+        var start=new CountDownLatch(1);var pool=Executors.newFixedThreadPool(2);
+        try {
+            Callable<Integer> edit=() -> {start.await();return mvc.perform(patch(path).header("Authorization","Bearer "+a.token()).contentType("application/json").content(body(Map.of("content",key(),"revision",0)))).andReturn().getResponse().getStatus();};
+            var one=pool.submit(edit);var two=pool.submit(edit);start.countDown();
+            assertThat(List.of(one.get(20,TimeUnit.SECONDS),two.get(20,TimeUnit.SECONDS))).containsExactlyInAnyOrder(200,409);
+        } finally {pool.shutdownNow();}
+    }
+
+    @Test void attachmentRepliesAndTombstonesKeepStorageReferencesSafe() throws Exception {
+        var a=account();var b=account();String room=send(a,b,key(),"Contact").get("room").get("id").asText();
+        String base="/api/v1/chat/rooms/"+room+"/messages";
+        for(String type:List.of("IMAGE","VOICE","FILE")) {
+            String file;
+            if(type.equals("VOICE")) file=uploadVoice(a);
+            else if(type.equals("IMAGE")) file=uploadGroupImage(a);
+            else {
+                var upload=new org.springframework.mock.web.MockMultipartFile("file","report.txt","text/plain","Report".getBytes());
+                file=data(mvc.perform(multipart("/api/v1/storage/files").file(upload).header("Authorization","Bearer "+a.token())).andExpect(status().isCreated()).andReturn()).get("id").asText();
+            }
+            var payload=new HashMap<String,Object>();payload.put("clientMessageId",key());payload.put("type",type);payload.put("fileId",file);
+            if(type.equals("VOICE")) payload.put("durationMs",1000);
+            String id=data(request(a,"POST",base,payload,200)).get("message").get("id").asText();
+            var reply=data(request(b,"POST",base,Map.of("clientMessageId",key(),"content","Reply","replyToId",id),200)).get("message");
+            assertThat(reply.get("reply").get("type").asText()).isEqualTo(type);
+            request(a,"PATCH",base+"/"+id,Map.of("content","Edit media","revision",0),400);
+            request(b,"DELETE",base+"/"+id,null,200);
+            request(b,"GET","/api/v1/storage/files/"+file+"/download",null,404);
+            request(a,"GET","/api/v1/storage/files/"+file+"/download",null,200);
+            var removed=data(request(a,"DELETE",base+"/"+id+"?everyone=true",null,200));
+            assertThat(removed.get("fileId").isNull()).isTrue();
+            request(a,"GET","/api/v1/storage/files/"+file+"/download",null,404);
+            assertThat(jdbc.queryForObject("select BIN_TO_UUID(file_id) from chat_messages where id=UUID_TO_BIN(?)",String.class,id)).isEqualToIgnoringCase(file);
+            payload.put("clientMessageId",key());request(a,"POST",base,payload,400);
+        }
     }
 }

@@ -188,7 +188,7 @@ public class VoiceFiles {
 
         var message=attached.get();
 
-        if(message.getDeletedAt()!=null) throw StorageErrors.missing();
+        if(message.getDeletedAt()!=null || message.getRemovedAt()!=null || messages.hiddenCount(message.getId(),actor)>0) throw StorageErrors.missing();
 
         var room=rooms.findById(message.getRoomId()).orElseThrow(StorageErrors::missing);
 
