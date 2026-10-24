@@ -92,7 +92,7 @@ public class VoiceFiles {
         var file=files.lockIncludingDeleted(id).orElseThrow(StorageErrors::missing);
         if (!actor.equals(file.getUploadedBy()) || file.getDeletedAt()!=null || file.getStatus()!=StoredFileStatus.AVAILABLE)
             throw StorageErrors.missing();
-        if (users.avatarReferences(id)>0 || file.isVoiceRecording() || messages.includingDeletedByFileId(id).isPresent())
+        if (users.avatarReferences(id)>0 || rooms.avatarReferences(id)>0 || file.isVoiceRecording() || messages.includingDeletedByFileId(id).isPresent())
             throw StorageErrors.invalid("File already attached or reserved for voice");
         if ((type==MessageType.IMAGE)!=(file.getCategory()==FileCategory.IMAGE))
             throw StorageErrors.invalid("Message type does not match file");
@@ -167,6 +167,14 @@ public class VoiceFiles {
 
     public void requireRead(UUID actor, StoredFile file) {
 
+        var groupAvatar=rooms.includingDeletedByAvatarFileId(file.getId());
+        if(groupAvatar.isPresent()) {
+            var room=groupAvatar.get();
+            if(room.getDeletedAt()!=null || members.findByRoomId(room.getId()).stream().noneMatch(m -> actor.equals(m.getUserId())))
+                throw StorageErrors.missing();
+            return;
+        }
+
         if (users.avatarReferences(file.getId())>0) return; // Avatars are visible to authenticated users.
         var attached=messages.includingDeletedByFileId(file.getId());
 
@@ -196,7 +204,7 @@ public class VoiceFiles {
 
     public void requireUnattached(UUID id) {
 
-        if(users.avatarReferences(id)>0 || messages.includingDeletedByFileId(id).isPresent()) throw StorageErrors.invalid("Attached files cannot be deleted independently");
+        if(users.avatarReferences(id)>0 || rooms.avatarReferences(id)>0 || messages.includingDeletedByFileId(id).isPresent()) throw StorageErrors.invalid("Attached files cannot be deleted independently");
 
     }
 

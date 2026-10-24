@@ -42,5 +42,7 @@ class SocketSecurityTest {
   assertThat(security.outbound().preSend(message,null)).isNotNull();
   when(access.active(jwt)).thenReturn(false);
   assertThat(security.outbound().preSend(message,null)).isNull();
+  assertThatThrownBy(() -> security.preSend(MessageBuilder.createMessage(new byte[0],subscribe.getMessageHeaders()),null))
+    .isInstanceOf(org.springframework.security.access.AccessDeniedException.class);
  }
 }

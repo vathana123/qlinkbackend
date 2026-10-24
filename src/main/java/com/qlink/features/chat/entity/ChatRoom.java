@@ -14,4 +14,8 @@ public class ChatRoom extends BaseEntity { @Enumerated(EnumType.STRING) @Column(
  @Enumerated(EnumType.STRING) @Column(nullable=false,length=30)
  private MessageHistoryVisibility messageHistoryVisibility = MessageHistoryVisibility.VIEW_ALL_MESSAGES;
  @Column(length=255) private String groupName;
+ @Column(length=2000) private String description;
+ @Column(columnDefinition="binary(16)") private UUID avatarFileId;
+ @Column(nullable=false) private boolean membersCanSend = true;
+ @Column(nullable=false) private boolean membersCanInvite = false;
  private Instant lastMessageAt; }

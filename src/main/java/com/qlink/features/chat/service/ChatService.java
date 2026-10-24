@@ -24,6 +24,7 @@ import java.util.*;
 @Service
 @Transactional(readOnly=true)
 public class ChatService {
+ @jakarta.persistence.PersistenceContext private jakarta.persistence.EntityManager entityManager;
  private final ChatRoomRepository rooms; private final ChatMemberRepository members;
  private final ChatMessageRepository messages; private final UserRepository users;
  private final UserService current; private final DiscoveryService discovery;
@@ -84,7 +85,9 @@ public class ChatService {
   var latest=messages.history(room.getId(),historyStart(viewer,room),null,null,PageRequest.of(0,1));
   Message last=latest.isEmpty()?null:messageDto(latest.get(0));
   return new Room(room.getId(),room.getCreatorId(),profile,room.getType()==ChatRoomType.PERSONAL?room.getLastMessageAt():(last==null?null:last.createdAt()),last,
-   room.getType().name(),room.getGroupName(),null,members.findByRoomId(room.getId()).size(),room.getMessageHistoryVisibility().name());
+   room.getType().name(),room.getGroupName(),room.getAvatarFileId()==null?null:"/api/v1/storage/files/"+room.getAvatarFileId()+"/download",
+   members.findByRoomId(room.getId()).size(),room.getMessageHistoryVisibility().name(),room.getDescription(),
+   membership(viewer,room.getId()).getRole().name(),room.isMembersCanSend(),room.isMembersCanInvite());
  }
  public Page<PublicUserResponse> contacts(UUID viewer,int page,int size) {
   current.requireActive(viewer);page(page,size);
@@ -98,7 +101,7 @@ public class ChatService {
   var type=request.type()==null?ChatRoomType.GROUP_PRIVATE:request.type();
   if(type==ChatRoomType.PERSONAL) throw bad("A group type is required");
   var ids=request.memberIds();
-  if(ids==null || ids.isEmpty() || ids.stream().anyMatch(Objects::isNull) || ids.contains(viewer) || new HashSet<>(ids).size()!=ids.size())
+  if(ids==null || ids.isEmpty() || ids.size()>199 || ids.stream().anyMatch(Objects::isNull) || ids.contains(viewer) || new HashSet<>(ids).size()!=ids.size())
    throw bad("Select distinct contacts other than yourself");
   for(UUID id:ids) if(users.contacts(viewer,id,PageRequest.of(0,1)).isEmpty()) throw bad("Every selected member must be an active contact");
   ChatRoom room=new ChatRoom();room.setCreatorId(viewer);room.setGroupName(name);room.setType(type);
@@ -110,7 +113,7 @@ public class ChatService {
    ChatRoomMember member=new ChatRoomMember();member.setRoomId(room.getId());member.setUserId(id);member.setJoinedAt(joined);
    member.setRole(id.equals(viewer)?ChatRoomMemberRole.OWNER:ChatRoomMemberRole.MEMBER);members.save(member);
   }
-  members.flush();return roomDto(viewer,room);
+  members.flush();events.publishEvent(new com.qlink.features.chat.realtime.GroupChanged(room.getId()));return roomDto(viewer,room);
  }
  private ChatRoom requireGroup(UUID viewer,UUID id) {
   var room=requireRoom(viewer,id);
@@ -184,13 +187,20 @@ public class ChatService {
   try { return MessageType.valueOf(type); } catch(IllegalArgumentException ex) { throw bad("Unsupported message type"); }
  }
  private Sent persist(UUID sender,UUID recipient,UUID requestedRoom,UUID key,String content,UUID fileId,Long durationMs,MessageType messageType) {
-  if(requestedRoom!=null && requireRoom(sender,requestedRoom).getType()!=ChatRoomType.PERSONAL) {
+  if(requestedRoom!=null && rooms.findById(requestedRoom).map(r -> r.getType()!=ChatRoomType.PERSONAL).orElse(false)) {
    users.lockById(sender).orElseThrow();
    var room=rooms.lockById(requestedRoom).orElseThrow();
+   entityManager.refresh(room); // Initial room lookup may predate a concurrent permission change.
    requireRoom(sender,requestedRoom);
+   var senderMembership=membership(sender,requestedRoom);
+   if(senderMembership.getRole()==ChatRoomMemberRole.MEMBER && !room.isMembersCanSend())
+    throw new ApiException(HttpStatus.FORBIDDEN,"GROUP_PERMISSION_DENIED","Members cannot send messages in this group");
    var prior=messages.previous(sender,key);
    if(prior.isPresent()) {
     var message=prior.get();
+    if(room.getMessageHistoryVisibility()==MessageHistoryVisibility.VIEW_AFTER_JOIN &&
+       message.getCreatedAt().isBefore(senderMembership.getJoinedAt()))
+     throw new ApiException(HttpStatus.FORBIDDEN,"MESSAGE_HISTORY_HIDDEN","Message is outside your visible history");
     if(message.getDeletedAt()!=null || !message.getRoomId().equals(requestedRoom) || !message.getContent().equals(content) || !Objects.equals(message.getFileId(),fileId) || (message.getType()!=messageType || (messageType==MessageType.VOICE && Math.abs(message.getDurationMs()-durationMs)>1000))) throw conflict();
     return new Sent(roomDto(sender,room),messageDto(message));
    }

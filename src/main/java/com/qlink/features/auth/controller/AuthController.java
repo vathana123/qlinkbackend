@@ -48,7 +48,7 @@ public class AuthController {
         return ApiResponse.ok("Token refreshed", auth.refresh(request.refreshToken()));
     }
     @PostMapping("/signout") @SecurityRequirement(name = "bearerAuth")
-    @Operation(summary = "Revoke the current application session", description = "Access JWTs remain valid until expiry. Provider credentials are not revoked.")
+    @Operation(summary = "Revoke the current application session", description = "Subsequent REST and WebSocket operations reject this session immediately. Other sessions and provider credentials are not revoked.")
     public ApiResponse<Void> signout(@AuthenticationPrincipal Jwt jwt) {
         auth.signout(UUID.fromString(jwt.getSubject()), UUID.fromString(jwt.getClaimAsString("sid")));
         return ApiResponse.ok("Signed out", null);

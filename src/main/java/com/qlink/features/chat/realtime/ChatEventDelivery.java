@@ -37,4 +37,20 @@ public class ChatEventDelivery {
    }
   }
  }
+ @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW)
+ public void deliver(GroupChanged changed) {
+  var room=rooms.findById(changed.roomId()).orElse(null);
+  var recipients=new java.util.HashSet<>(changed.removedUsers());
+  if(room!=null) members.findByRoomId(room.getId()).forEach(m -> recipients.add(m.getUserId()));
+  for(var user:recipients) {
+   if(users.findById(user).filter(u -> u.getStatus()==UserStatus.ACTIVE).isEmpty()) continue;
+   try {
+    // Re-read membership after commit. A delayed removal event must not evict a rejoined member.
+    boolean active=room!=null && members.findByRoomId(room.getId()).stream().anyMatch(m -> m.getUserId().equals(user));
+    var event=new ChatEvent(java.util.UUID.randomUUID(),active?"GROUP_UPDATED":"GROUP_REMOVED",changed.roomId(),
+     room==null?ChatRoomType.GROUP_PRIVATE:room.getType(),null,active?chat.group(user,room.getId()):null);
+    broker.convertAndSendToUser(user.toString(),"/queue/chat-events",event);
+   } catch(RuntimeException ex) { log.warn("Group event delivery failed ({})",ex.getClass().getSimpleName()); }
+  }
+ }
 }

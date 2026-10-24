@@ -4,6 +4,10 @@ import org.springframework.data.jpa.repository.*;
 import org.springframework.data.domain.*;
 import java.util.*;
 public interface ChatRoomRepository extends JpaRepository<ChatRoom,UUID> {
+ @Query(value="select count(*) from chat_rooms where avatar_file_id=:id",nativeQuery=true)
+ long avatarReferences(UUID id);
+ @Query(value="select * from chat_rooms where avatar_file_id=:id",nativeQuery=true)
+ Optional<ChatRoom> includingDeletedByAvatarFileId(UUID id);
  @Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
  @Query("select r from ChatRoom r where r.id=:id")
  Optional<ChatRoom> lockById(UUID id);

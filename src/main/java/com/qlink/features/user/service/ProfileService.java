@@ -53,7 +53,7 @@ public class ProfileService {
         UserResponse result;
         try {
             result=transaction.execute(tx -> {
-                access.actor(jwt);
+                access.recheck(jwt);
                 var user=users.lockById(actor).orElseThrow(() -> ApiException.unauthorized("USER_UNAVAILABLE","User unavailable"));
                 old[0]=user.getAvatarFileId();
                 user.setAvatarFileId(uploaded==null ? null : uploaded.id());

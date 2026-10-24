@@ -87,7 +87,8 @@ class ChatIntegrationTest {
     }
     MvcResult request(Account user,String method,String path,Object payload,int expected) throws Exception {
         var builder=switch(method) {
-            case "POST" -> post(path); case "PATCH" -> patch(path); default -> get(path);
+            case "POST" -> post(path); case "PATCH" -> patch(path); case "PUT" -> put(path);
+            case "DELETE" -> delete(path); default -> get(path);
         };
         builder.header("Authorization","Bearer "+user.token());
         if(payload!=null)builder.contentType("application/json").content(body(payload));
@@ -440,6 +441,13 @@ class ChatIntegrationTest {
             .header("Authorization","Bearer "+owner.token())).andExpect(status().isCreated()).andReturn()).get("id").asText();
     }
 
+    String uploadGroupImage(Account owner) throws Exception {
+        byte[] png=Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV1sAAAAASUVORK5CYII=");
+        var file=new org.springframework.mock.web.MockMultipartFile("file","group.png","image/png",png);
+        return data(mvc.perform(multipart("/api/v1/storage/files").file(file)
+            .header("Authorization","Bearer "+owner.token())).andExpect(status().isCreated()).andReturn()).get("id").asText();
+    }
+
     @Test void fileAttachmentsUseExistingRealtimeAndGroupHistoryAuthorization() throws Exception {
         var a=account(); var b=account(); send(a,b,key(),"contact");
         String room=data(request(a,"POST","/api/v1/chat/groups",Map.of("name","Attachments","memberIds",List.of(b.id())),200)).get("id").asText();
@@ -596,6 +604,7 @@ class ChatIntegrationTest {
             wa.subscribe(a);wb.subscribe(b);wc.subscribe(c);wo.subscribe(outsider);
             for(String type:List.of("GROUP_PRIVATE","GROUP_PUBLIC")) {
                 String room=data(request(a,"POST","/api/v1/chat/groups",Map.of("name","Realtime","type",type,"memberIds",List.of(b.id(),c.id())),200)).get("id").asText();
+                for(var wire:List.of(wa,wb,wc)) assertThat(wire.event().get("type").asText()).isEqualTo("GROUP_UPDATED");
                 request(a,"POST","/api/v1/chat/rooms/"+room+"/messages",Map.of("clientMessageId",key(),"content","Group live"),200);
                 for(var wire:List.of(wa,wb,wc)) {
                     var event=wire.event();assertThat(event.get("roomType").asText()).isEqualTo(type);
@@ -611,5 +620,112 @@ class ChatIntegrationTest {
             users.softDelete(UUID.fromString(b.id()),UUID.fromString(b.id()));
             send(a,c,key(),"Active member only");wa.event();wc.event();wb.quiet();
         }
+    }
+
+    String managedGroup(Account owner, Account initialMember) throws Exception {
+        return managedGroup(owner,initialMember,"VIEW_AFTER_JOIN");
+    }
+    String managedGroup(Account owner, Account initialMember, String historyVisibility) throws Exception {
+        send(owner,initialMember,key(),"contact");
+        return data(request(owner,"POST","/api/v1/chat/groups",
+            Map.of("name","Managed","memberIds",List.of(initialMember.id()),"messageHistoryVisibility",historyVisibility),200)).get("id").asText();
+    }
+
+    @Test void groupOwnerCoOwnerAndMemberActionsAreEnforced() throws Exception {
+        var owner=account(); var coOwner=account(); var member=account(); var invitee=account(); var stranger=account();
+        String room=managedGroup(owner,coOwner), path="/api/v1/chat/groups/"+room;
+        request(owner,"POST",path+"/members",Map.of("memberIds",List.of(member.id())),200);
+        request(owner,"PATCH",path+"/members/"+coOwner.id()+"/role",Map.of("role","CO_OWNER"),200);
+
+        request(member,"PATCH",path,Map.of("name","Forbidden","description",""),403);
+        request(member,"PATCH",path+"/members/"+coOwner.id()+"/role",Map.of("role","CO_OWNER"),403);
+        request(member,"POST",path+"/ownership",Map.of("userId",coOwner.id()),403);
+        request(member,"PATCH",path+"/permissions",Map.of("membersCanSend",false,"membersCanInvite",true),403);
+        request(member,"DELETE",path,null,403);
+        request(stranger,"GET",path,null,403);
+
+        request(coOwner,"PATCH",path,Map.of("name","Co-owner edit","description","Group notes"),200);
+        request(coOwner,"DELETE",path+"/members/"+owner.id(),null,403);
+        request(coOwner,"PATCH",path+"/members/"+member.id()+"/role",Map.of("role","CO_OWNER"),403);
+        request(coOwner,"POST",path+"/ownership",Map.of("userId",member.id()),403);
+        request(coOwner,"PATCH",path+"/permissions",Map.of("membersCanSend",false,"membersCanInvite",true),403);
+        request(coOwner,"DELETE",path,null,403);
+        request(coOwner,"DELETE",path+"/members/"+member.id(),null,200);
+        request(member,"GET","/api/v1/chat/rooms/"+room+"/messages",null,403);
+
+        request(owner,"POST",path+"/members",Map.of("memberIds",List.of(member.id())),200);
+        request(member,"POST",path+"/members",Map.of("memberIds",List.of(invitee.id())),403);
+        request(owner,"PATCH",path+"/permissions",Map.of("membersCanSend",false,"membersCanInvite",true),200);
+        request(member,"POST",path+"/members",Map.of("memberIds",List.of(invitee.id())),200);
+        request(member,"POST","/api/v1/chat/rooms/"+room+"/messages",Map.of("clientMessageId",key(),"content","denied"),403);
+        request(owner,"POST","/api/v1/chat/rooms/"+room+"/messages",Map.of("clientMessageId",key(),"content","owner can send"),200);
+        request(coOwner,"POST","/api/v1/chat/rooms/"+room+"/messages",Map.of("clientMessageId",key(),"content","co-owner can send"),200);
+
+        request(owner,"POST",path+"/leave",null,400);
+        request(owner,"PATCH",path+"/members/"+coOwner.id()+"/role",Map.of("role","MEMBER"),200);
+        request(coOwner,"PATCH",path,Map.of("name","Demoted"),403);
+        request(owner,"POST",path+"/ownership",Map.of("userId",coOwner.id()),200);
+        assertThat(data(request(coOwner,"GET",path,null,200)).get("myRole").asText()).isEqualTo("OWNER");
+        assertThat(jdbc.queryForObject("select count(*) from chat_room_members where room_id=UUID_TO_BIN(?) and deleted_at is null and role='OWNER'",Integer.class,room)).isEqualTo(1);
+        request(coOwner,"DELETE",path,null,200);
+        request(owner,"GET",path,null,404);
+    }
+
+    @Test void concurrentOwnershipTransfersCommitOneOwner() throws Exception {
+        var owner=account(); var first=account(); var second=account();
+        String room=managedGroup(owner,first), path="/api/v1/chat/groups/"+room;
+        request(owner,"POST",path+"/members",Map.of("memberIds",List.of(second.id())),200);
+        var start=new CountDownLatch(1); var pool=Executors.newFixedThreadPool(2);
+        try {
+            var tasks=new ArrayList<Future<Integer>>();
+            for(var target:List.of(first,second)) tasks.add(pool.submit(()->{
+                start.await();
+                return mvc.perform(post(path+"/ownership").header("Authorization","Bearer "+owner.token())
+                    .contentType("application/json").content(body(Map.of("userId",target.id())))).andReturn().getResponse().getStatus();
+            }));
+            start.countDown();
+            assertThat(List.of(tasks.get(0).get(30,TimeUnit.SECONDS),tasks.get(1).get(30,TimeUnit.SECONDS)))
+                .containsExactlyInAnyOrder(200,403);
+        } finally { pool.shutdownNow(); }
+        assertThat(jdbc.queryForObject("select count(*) from chat_room_members where room_id=UUID_TO_BIN(?) and deleted_at is null and role='OWNER'",Integer.class,room)).isEqualTo(1);
+    }
+
+    @Test void rejoiningStartsANewHistoryBoundaryAndIdempotentRetryRespectsIt() throws Exception {
+        for(String visibility:List.of("VIEW_AFTER_JOIN","VIEW_ALL_MESSAGES")) {
+            var owner=account(); var member=account();
+            String room=managedGroup(owner,member,visibility), path="/api/v1/chat/groups/"+room;
+            String oldKey=key();
+            request(member,"POST","/api/v1/chat/rooms/"+room+"/messages",Map.of("clientMessageId",oldKey,"content","Earlier message"),200);
+            request(member,"POST",path+"/leave",null,200);
+            request(owner,"POST",path+"/members",Map.of("memberIds",List.of(member.id())),200);
+            var history=data(request(member,"GET","/api/v1/chat/rooms/"+room+"/messages",null,200));
+            assertThat(history.get("items").size()).isEqualTo(visibility.equals("VIEW_ALL_MESSAGES")?1:0);
+            request(member,"POST","/api/v1/chat/rooms/"+room+"/messages",Map.of("clientMessageId",oldKey,"content","Earlier message"),visibility.equals("VIEW_ALL_MESSAGES")?200:403);
+            request(member,"POST","/api/v1/chat/rooms/"+room+"/messages",Map.of("clientMessageId",key(),"content","After rejoining"),200);
+            var after=data(request(member,"GET","/api/v1/chat/rooms/"+room+"/messages",null,200));
+            assertThat(after.get("items").size()).isEqualTo(visibility.equals("VIEW_ALL_MESSAGES")?2:1);
+            assertThat(after.get("items").get(0).get("content").asText()).isEqualTo("After rejoining");
+        }
+    }
+
+    @Test void groupAvatarUpdatesAreRoleCheckedAndPrivateToActiveMembers() throws Exception {
+        var owner=account(); var member=account(); var outsider=account();
+        String room=managedGroup(owner,member), path="/api/v1/chat/groups/"+room;
+        String first=uploadGroupImage(owner);
+        request(member,"PUT",path+"/avatar",Map.of("fileId",first),403);
+        request(owner,"PUT",path+"/avatar",Map.of("fileId",first),200);
+        request(member,"GET","/api/v1/storage/files/"+first+"/download",null,200);
+        request(outsider,"GET","/api/v1/storage/files/"+first+"/download",null,404);
+        request(owner,"DELETE","/api/v1/storage/files/"+first,null,400);
+
+        request(owner,"PATCH",path+"/members/"+member.id()+"/role",Map.of("role","CO_OWNER"),200);
+        String second=uploadGroupImage(member);
+        request(member,"PUT",path+"/avatar",Map.of("fileId",second),200);
+        request(owner,"GET","/api/v1/storage/files/"+first+"/download",null,404);
+        request(owner,"GET","/api/v1/storage/files/"+second+"/download",null,200);
+        request(owner,"DELETE",path+"/members/"+member.id(),null,200);
+        request(member,"GET","/api/v1/storage/files/"+second+"/download",null,404);
+        request(owner,"DELETE",path+"/avatar",null,200);
+        request(owner,"GET","/api/v1/storage/files/"+second+"/download",null,404);
     }
 }
