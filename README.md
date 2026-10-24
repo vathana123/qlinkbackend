@@ -220,7 +220,9 @@ POST /api/v1/auth/signout
 Authorization: Bearer <application-access-jwt>
 ~~~
 
-Signout requires no body; it revokes the session identified by the access JWT's sid. It is idempotent while that access token is valid. Already-issued stateless access tokens remain valid until expiration; /me additionally rejects unavailable users. Google/Apple tokens are never accepted as application access tokens.
+Signout requires no body; it revokes the session identified by the access JWT's sid. Phase 4.1A adopts immediate revocation: subsequent authenticated REST operations and WebSocket subscriptions/delivery reject that session, even before its access JWT expires. Repeating signout with the revoked token returns 401. Other device sessions remain active. Google/Apple tokens are never accepted as application access tokens.
+
+`SessionAuthorization` checks session ownership, revocation, expiry, and active user status in one database query after JWT cryptographic validation. Successful REST checks are reused only within the current HTTP request; slow uploads and WebSocket operations explicitly recheck. There is no cross-request revocation cache. Already-authorized in-flight work is not forcibly interrupted. Authentication errors retain the existing API envelope. CORS includes PUT for avatar replacement while retaining explicit origins and disallowing credentials.
 
 Example error:
 

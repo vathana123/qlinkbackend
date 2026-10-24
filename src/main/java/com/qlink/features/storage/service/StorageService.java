@@ -63,7 +63,7 @@ public class StorageService {
             }
             return transaction.execute(tx -> {
                 // Recheck identity before publication after a potentially slow upload.
-                access.actor(jwt);
+                access.recheck(jwt);
                 var file=new StoredFile();
                 file.setVoiceRecording(voice); file.setOriginalName(name); file.setStorageKey(key); file.setContentType(bytes.contentType());
                 file.setSizeBytes(bytes.size()); file.setChecksumSha256(bytes.sha256());

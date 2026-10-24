@@ -70,6 +70,18 @@ class GroupChatMigrationTest {
         assertThatThrownBy(()->db.update("update chat_room_members set role='ADMIN' where room_id=UUID_TO_BIN(?)",active)).isInstanceOf(org.springframework.dao.DataAccessException.class).hasMessageContaining("ck_chat_room_member_role");
         db.update("update chat_room_members set role='OWNER' where room_id=UUID_TO_BIN(?) and user_id=UUID_TO_BIN(?)",active,a);
         assertThat(db.queryForObject("select count(*) from chat_room_members where role='OWNER'",Integer.class)).isEqualTo(1);
+        String legacyGroup=UUID.randomUUID().toString();
+        db.update("""
+            insert into chat_rooms (id,type,creator_id,group_name,message_history_visibility,created_at,updated_at)
+            values (UUID_TO_BIN(?),'GROUP_PRIVATE',UUID_TO_BIN(?),'Legacy group','VIEW_AFTER_JOIN',UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))
+            """,legacyGroup,a);
+        for(String user:new String[]{a,b}) db.update("""
+            insert into chat_room_members (id,room_id,user_id,joined_at,created_at,updated_at)
+            values (UUID_TO_BIN(UUID()),UUID_TO_BIN(?),UUID_TO_BIN(?),UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))
+            """,legacyGroup,user);
+        Flyway.configure().dataSource(source).load().migrate();
+        assertThat(db.queryForObject("select count(*) from chat_room_members where room_id=UUID_TO_BIN(?) and role='OWNER' and deleted_at is null",Integer.class,legacyGroup)).isEqualTo(1);
+        assertThat(db.queryForObject("select BIN_TO_UUID(user_id) from chat_room_members where room_id=UUID_TO_BIN(?) and role='OWNER' and deleted_at is null",String.class,legacyGroup)).isEqualTo(a);
         // Old inserts remain valid, and soft deletion still releases the personal pair.
         db.update("update chat_rooms set deleted_at=UTC_TIMESTAMP(6) where id=UUID_TO_BIN(?)",active);
         db.update("""

@@ -13,7 +13,8 @@ import java.util.List;
 @Configuration
 public class SecurityConfig {
     @Bean
-    SecurityFilterChain securityFilterChain(HttpSecurity http, ObjectMapper json) throws Exception {
+    SecurityFilterChain securityFilterChain(HttpSecurity http, ObjectMapper json,
+            com.qlink.features.auth.service.SessionAuthorization sessions) throws Exception {
         var entryPoint = (org.springframework.security.web.AuthenticationEntryPoint) (request, response, ex) -> {
             response.setStatus(401); response.setContentType("application/json");
             response.getWriter().write(json.writeValueAsString(ApiError.of("UNAUTHORIZED", "A valid application access token is required")));
@@ -29,14 +30,22 @@ public class SecurityConfig {
                     response.setStatus(403); response.setContentType("application/json");
                     response.getWriter().write(json.writeValueAsString(ApiError.of("FORBIDDEN", "Access denied")));
                 }))
-                .oauth2ResourceServer(o -> o.jwt(j -> {}).authenticationEntryPoint(entryPoint))
+                .oauth2ResourceServer(o -> o.jwt(j -> j.jwtAuthenticationConverter(jwt -> {
+                    try {
+                        sessions.actor(jwt);
+                    } catch (com.qlink.common.exception.ApiException ex) {
+                        throw new org.springframework.security.oauth2.core.OAuth2AuthenticationException(
+                                new org.springframework.security.oauth2.core.OAuth2Error(ex.getCode()), ex);
+                    }
+                    return new org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter().convert(jwt);
+                })).authenticationEntryPoint(entryPoint))
                 .build();
     }
     @Bean
     CorsConfigurationSource corsConfigurationSource(@Value("${qlink.cors.allowed-origins}") List<String> origins) {
         var config = new CorsConfiguration();
         config.setAllowedOrigins(origins);
-        config.setAllowedMethods(List.of("GET", "POST", "PATCH", "DELETE", "OPTIONS"));
+        config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         config.setAllowedHeaders(List.of("Authorization", "Content-Type"));
         config.setAllowCredentials(false);
         config.setMaxAge(3600L);

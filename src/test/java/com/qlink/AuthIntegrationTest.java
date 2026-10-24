@@ -152,9 +152,9 @@ class AuthIntegrationTest {
         mvc.perform(post("/api/v1/auth/signout").header("Authorization", "Bearer " + signin.get("accessToken").asText()))
                 .andExpect(status().isOk());
         postJson("refresh", Map.of("refreshToken", signin.get("refreshToken").asText()), 401);
-        // Access JWTs are intentionally stateless after signout.
+        // Revocation immediately applies to previously issued access tokens.
         mvc.perform(get("/api/v1/auth/me").header("Authorization", "Bearer " + signin.get("accessToken").asText()))
-                .andExpect(status().isOk());
+                .andExpect(status().isUnauthorized());
         UUID id = UUID.fromString(userId);
         byte[] actor = jdbc.queryForObject("select updated_by from users where id = UNHEX(REPLACE(?, '-', ''))", byte[].class, userId);
         assertThat(actor).hasSize(16);
@@ -226,6 +226,47 @@ class AuthIntegrationTest {
             mvc.perform(get("/api/v1/auth/me").header("Authorization", "Bearer " + token)).andExpect(status().isUnauthorized());
         }
     }
+    @Test void revocationProtectsRestAndKeepsOtherDeviceSessionActive() throws Exception {
+        String subject=UUID.randomUUID().toString();
+        var first=signup(subject);
+        var other=data(postJson("signin",provider(subject),200));
+        String firstBearer="Bearer "+first.get("accessToken").asText();
+        String otherBearer="Bearer "+other.get("accessToken").asText();
+        var file=data(mvc.perform(multipart("/api/v1/storage/files")
+                .file(new org.springframework.mock.web.MockMultipartFile("file","notes.txt","text/plain","hello".getBytes()))
+                .header("Authorization",firstBearer)).andExpect(status().isCreated()).andReturn());
+        var paths=List.of("/api/v1/auth/me","/api/v1/users/search?q=User","/api/v1/contacts",
+                "/api/v1/chat/rooms","/api/v1/storage/files/"+file.get("id").asText()+"/download");
+        for(String path:paths) mvc.perform(get(path).header("Authorization",firstBearer)).andExpect(status().isOk());
+        mvc.perform(post("/api/v1/auth/signout").header("Authorization",firstBearer)).andExpect(status().isOk());
+        for(String path:paths) {
+            mvc.perform(get(path).header("Authorization",firstBearer))
+                    .andExpect(status().isUnauthorized()).andExpect(jsonPath("$.data.code").value("UNAUTHORIZED"));
+            mvc.perform(get(path).header("Authorization",otherBearer)).andExpect(status().isOk());
+        }
+        mvc.perform(patch("/api/v1/users/me").header("Authorization",firstBearer)
+                .contentType("application/json").content(body(Map.of("displayName","Changed"))))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/v1/chat/groups").header("Authorization",firstBearer)
+                .contentType("application/json").content("{}" )).andExpect(status().isUnauthorized());
+        postJson("refresh",Map.of("refreshToken",first.get("refreshToken").asText()),401);
+        postJson("refresh",Map.of("refreshToken",other.get("refreshToken").asText()),200);
+    }
+
+    @Test void avatarPutCorsAllowsOnlyConfiguredOriginsAndHeaders() throws Exception {
+        mvc.perform(options("/api/v1/users/me/avatar").header("Origin","http://localhost:3000")
+                .header("Access-Control-Request-Method","PUT")
+                .header("Access-Control-Request-Headers","authorization,content-type"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Access-Control-Allow-Origin","http://localhost:3000"))
+                .andExpect(header().string("Access-Control-Allow-Methods",org.hamcrest.Matchers.containsString("PUT")))
+                .andExpect(header().string("Access-Control-Allow-Headers",org.hamcrest.Matchers.containsString("authorization")))
+                .andExpect(header().string("Access-Control-Allow-Headers",org.hamcrest.Matchers.containsString("content-type")))
+                .andExpect(header().doesNotExist("Access-Control-Allow-Credentials"));
+        mvc.perform(options("/api/v1/users/me/avatar").header("Origin","https://unapproved.example")
+                .header("Access-Control-Request-Method","PUT")).andExpect(status().isForbidden());
+    }
+
     @Test void swaggerAndCorsAreAvailable() throws Exception {
         mvc.perform(get("/swagger-ui/index.html")).andExpect(status().isOk()).andExpect(content().contentTypeCompatibleWith("text/html"));
         mvc.perform(get("/v3/api-docs")).andExpect(status().isOk())
