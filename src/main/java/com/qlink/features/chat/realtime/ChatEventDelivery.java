@@ -25,18 +25,21 @@ public class ChatEventDelivery {
   var room=rooms.findById(message.getRoomId()).orElse(null);
   if(room==null)return;
 
+  boolean failed=false;
   for(var member:members.findByRoomId(room.getId())) {
    if(users.findById(member.getUserId()).filter(u -> u.getStatus()==UserStatus.ACTIVE).isEmpty())continue;
    if(room.getType()!=ChatRoomType.PERSONAL && room.getMessageHistoryVisibility()==MessageHistoryVisibility.VIEW_AFTER_JOIN &&
      message.getCreatedAt().isBefore(member.getJoinedAt()))continue;
    if(committed.onlyUser()!=null && !committed.onlyUser().equals(member.getUserId())) continue;
    try {
-    var event=new ChatEvent("MESSAGE_CREATED".equals(committed.type())?message.getId():java.util.UUID.randomUUID(),committed.type(),room.getId(),room.getType(),chat.messageDto(member.getUserId(),message),chat.room(member.getUserId(),room.getId()));
+    var event=new ChatEvent("MESSAGE_CREATED".equals(committed.type())?message.getId():committed.jobId()==null?java.util.UUID.randomUUID():committed.jobId(),committed.type(),room.getId(),room.getType(),chat.messageDto(member.getUserId(),message),chat.room(member.getUserId(),room.getId()));
     broker.convertAndSendToUser(member.getUserId().toString(),"/queue/chat-events",event);
    } catch(RuntimeException ex) {
+    failed=true;
     log.warn("Chat event delivery failed for message {} ({})",message.getId(),ex.getClass().getSimpleName());
    }
   }
+  if(failed) throw new IllegalStateException("Chat event delivery incomplete");
  }
  @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW)
  public void deliver(GroupChanged changed) {

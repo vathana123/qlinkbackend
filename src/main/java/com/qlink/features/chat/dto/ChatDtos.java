@@ -11,9 +11,10 @@ public final class ChatDtos {
  public record Send(@NotNull UUID clientMessageId,@Size(max=4000) String content, String type, UUID fileId, Long durationMs, UUID replyToId) {
  public Send(UUID clientMessageId, String content) { this(clientMessageId,content,null,null,null,null); }
  }
+ public record Receipts(@NotEmpty @Size(max=50) List<@NotNull UUID> messageIds, boolean seen) {}
  public record Edit(@NotBlank @Size(max=4000) String content, @NotNull @PositiveOrZero Long revision) {}
  public record Reply(UUID id, String senderDisplayName, String type, String content, boolean unavailable) {}
- public record Message(UUID id, UUID roomId, UUID senderId, UUID clientMessageId, String type, String content, Instant createdAt, String senderDisplayName, UUID fileId, Long durationMs, String audioContentType, Long audioSizeBytes, Attachment attachment, UUID replyToId, Reply reply, Instant editedAt, Instant removedAt, long revision, boolean hidden, boolean canDeleteForEveryone) {}
+ public record Message(UUID id, UUID roomId, UUID senderId, UUID clientMessageId, String type, String content, Instant createdAt, String senderDisplayName, UUID fileId, Long durationMs, String audioContentType, Long audioSizeBytes, Attachment attachment, UUID replyToId, Reply reply, Instant editedAt, Instant removedAt, long revision, boolean hidden, boolean canDeleteForEveryone, String delivery, int recipientCount, int deliveredCount, int seenCount) {}
  public record Attachment(String originalName, String contentType, long sizeBytes) {}
  public record Room(UUID id, UUID creatorId, PublicUserResponse participant, Instant lastMessageAt, Message lastMessage, String type, String name, String avatarUrl, int memberCount, String messageHistoryVisibility,
  String description, String myRole, boolean membersCanSend, boolean membersCanInvite) {}

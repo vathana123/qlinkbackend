@@ -17,5 +17,6 @@ public class StoredFile extends BaseEntity {
     @Enumerated(EnumType.STRING) @Column(nullable=false, length=30) private StoredFileStatus status = StoredFileStatus.PENDING;
     @Column(nullable=false, columnDefinition="binary(16)") private UUID uploadedBy;
     @Column(nullable=false) private boolean voiceRecording;
+    @Column(columnDefinition="binary(16)") private UUID uploadKey;
     public void markDeleted(UUID actor) { status = StoredFileStatus.DELETED; softDelete(actor); }
 }

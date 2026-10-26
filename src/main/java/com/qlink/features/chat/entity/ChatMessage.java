@@ -19,6 +19,9 @@ public class ChatMessage extends BaseEntity { @Column(nullable=false,columnDefin
  private Instant removedAt;
  private UUID removedBy;
  private long revision;
+ private int recipientCount;
+ private int deliveredCount;
+ private int seenCount;
  private Long durationMs;
  private String audioContentType;
  private Long audioSizeBytes;

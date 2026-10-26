@@ -7,6 +7,8 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
+import org.springframework.web.util.DisconnectedClientHelper;
+import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.*;
 import java.util.*;
 
@@ -58,9 +60,23 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(405).body(ApiError.of("METHOD_NOT_ALLOWED", "Method not allowed"));
     }
     @ExceptionHandler(Exception.class)
-    ResponseEntity<ApiError> unexpected(Exception ex) {
+    ResponseEntity<ApiError> unexpected(Exception ex, HttpServletResponse response) {
+        // Includes AsyncRequestNotUsableException, even before the servlet marks
+        // the response committed. Never try to write another body in this case.
+        if (DisconnectedClientHelper.isClientDisconnectedException(ex)) {
+            log.debug("Client response is no longer usable");
+            return null;
+        }
         // Do not log token-bearing request bodies or exception messages.
         log.error("Unhandled API failure of type {}", ex.getClass().getName());
-        return ResponseEntity.internalServerError().body(ApiError.of("INTERNAL_ERROR", "An unexpected error occurred"));
+        if (response.isCommitted()) return null;
+        // Streaming may have selected a media type and buffered some bytes.
+        // Retain security headers but discard that body and its file metadata.
+        response.resetBuffer();
+        response.setContentLengthLong(-1);
+        response.setHeader(HttpHeaders.CONTENT_LENGTH, null);
+        response.setHeader(HttpHeaders.CONTENT_DISPOSITION, null);
+        return ResponseEntity.internalServerError().contentType(MediaType.APPLICATION_JSON)
+                .body(ApiError.of("INTERNAL_ERROR", "An unexpected error occurred"));
     }
 }
