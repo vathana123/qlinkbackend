@@ -1,4 +1,5 @@
 package com.qlink.features.push;
+import lombok.RequiredArgsConstructor;
 import com.qlink.common.response.ApiResponse;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -7,8 +8,9 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 import java.util.*;
 @RestController @RequestMapping("/api/v1")
+@RequiredArgsConstructor
 public class PushController {
- private final PushService push;public PushController(PushService push){this.push=push;}
+ private final PushService push;
  public record Registration(@NotBlank @Size(max=4096) String token,@NotBlank String platform){}
  public record Mute(boolean muted){}
  @PutMapping("/push/devices/{installation}") public ApiResponse<Void> register(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID installation,@Valid @RequestBody Registration request){push.register(UUID.fromString(jwt.getSubject()),UUID.fromString(jwt.getClaimAsString("sid")),installation,request.token(),request.platform());return ApiResponse.ok("Device registered",null);}

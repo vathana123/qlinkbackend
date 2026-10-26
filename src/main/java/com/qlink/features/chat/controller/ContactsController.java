@@ -1,4 +1,5 @@
 package com.qlink.features.chat.controller;
+import lombok.RequiredArgsConstructor;
 import com.qlink.common.response.ApiResponse;
 import com.qlink.features.chat.service.ChatService;
 import com.qlink.features.user.dto.PublicUserResponse;
@@ -9,9 +10,10 @@ import org.springframework.data.domain.Page;
 import java.util.UUID;
 @RestController
 @RequestMapping("/api/v1/contacts")
+@RequiredArgsConstructor
 public class ContactsController {
  private final ChatService service;
- public ContactsController(ChatService service) {this.service=service;}
+
  @GetMapping
  public ApiResponse<Page<PublicUserResponse>> contacts(@AuthenticationPrincipal Jwt jwt,@RequestParam(defaultValue="0") int page,@RequestParam(defaultValue="20") int size) {
   return ApiResponse.ok("Contacts",service.contacts(UUID.fromString(jwt.getSubject()),page,size));

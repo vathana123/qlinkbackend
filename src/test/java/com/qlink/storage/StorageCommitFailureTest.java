@@ -32,7 +32,7 @@ class StorageCommitFailureTest {
         var manager=mock(PlatformTransactionManager.class);
         when(manager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
         doThrow(new TransactionSystemException("commit failure")).when(manager).commit(any());
-        var service=new StorageService(provider,files,mapper,new FileContentPolicy(),access,mock(StorageCleanupService.class),properties,mock(com.qlink.features.storage.service.VoiceFiles.class),manager);
+        var service=new StorageService(provider,files,mapper,new FileContentPolicy(),access,mock(StorageCleanupService.class),properties,mock(com.qlink.features.storage.service.VoiceFiles.class),manager,mock(com.qlink.features.user.repository.UserRepository.class));
         var token=Jwt.withTokenValue("test").header("alg","test").subject(actor.toString()).build();
         assertThatThrownBy(() -> service.upload(token,new MockMultipartFile("file","notes.txt","text/plain","hello".getBytes()),null))
             .isInstanceOf(ApiException.class).extracting("code").isEqualTo("STORAGE_UNAVAILABLE");

@@ -1,4 +1,5 @@
 package com.qlink.features.storage.controller;
+import lombok.RequiredArgsConstructor;
 
 import com.qlink.features.storage.service.StorageService;
 import com.qlink.features.storage.dto.StoredFileResponse;
@@ -19,14 +20,12 @@ import java.util.UUID;
 
 @RestController @RequestMapping("/api/v1/storage/files")
 @SecurityRequirement(name="bearerAuth")
+@RequiredArgsConstructor
 public class StorageController {
     private final StorageService service;
     private final com.qlink.features.storage.config.StorageProperties properties;
     private final com.qlink.features.storage.service.FileContentPolicy policy;
-    public StorageController(StorageService service, com.qlink.features.storage.config.StorageProperties properties,
-            com.qlink.features.storage.service.FileContentPolicy policy) {
-        this.service=service; this.properties=properties; this.policy=policy;
-    }
+
     @GetMapping("/policy")
     public ApiResponse<java.util.Map<String,Object>> policy() {
         return ApiResponse.ok("Upload policy",java.util.Map.of("maxSizeBytes",properties.maxFileSize().toBytes(),"extensions",policy.extensions()));
