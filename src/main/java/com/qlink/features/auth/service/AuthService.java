@@ -19,6 +19,7 @@ import java.util.UUID;
 
 @Service
 public class AuthService {
+    @org.springframework.beans.factory.annotation.Autowired private com.qlink.features.push.PushDeviceRepository pushDevices;
     private final ProviderTokenVerifier verifier;
     private final NonceService nonces;
     private final UserRepository users;
@@ -84,7 +85,7 @@ public class AuthService {
         var previous = refreshTokens.findByTokenHash(TokenHash.sha256(rawToken)).orElseThrow(AuthService::invalidRefresh);
         if (!session.getId().equals(previous.getSessionId())) throw invalidRefresh();
         if (previous.getRevokedAt() != null) {
-            session.setRevokedAt(Instant.now()); session.recordActor(session.getUserId());
+            session.setRevokedAt(Instant.now()); session.recordActor(session.getUserId());pushDevices.deleteBySessionId(session.getId());
             throw ApiException.unauthorized("REFRESH_TOKEN_REUSED", "Refresh token reuse detected; sign in again");
         }
         if (!previous.getExpiresAt().isAfter(Instant.now())) throw invalidRefresh();
@@ -108,7 +109,7 @@ public class AuthService {
     public void signout(UUID userId, UUID sessionId) {
         var session = sessions.findLockedById(sessionId).orElseThrow(AuthService::invalidRefresh);
         if (!session.getUserId().equals(userId)) throw invalidRefresh();
-        session.setRevokedAt(Instant.now()); session.recordActor(userId);
+        session.setRevokedAt(Instant.now()); session.recordActor(userId);pushDevices.deleteBySessionId(sessionId);
     }
     private static ApiException invalidRefresh() {
         return ApiException.unauthorized("INVALID_REFRESH_TOKEN", "Refresh token is invalid or expired");

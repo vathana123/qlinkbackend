@@ -53,6 +53,7 @@ class ChatIntegrationTest {
         Files.deleteIfExists(keyDir.resolve("private.pem")); Files.deleteIfExists(keyDir.resolve("public.pem")); Files.deleteIfExists(keyDir);
     }
     @DynamicPropertySource static void properties(DynamicPropertyRegistry registry) {
+        registry.add("qlink.push.initial-delay-ms", () -> "3600000");
         registry.add("app.storage.root-path", () -> storageDir.toString());
         registry.add("spring.datasource.url", mysql::getJdbcUrl);
         registry.add("spring.datasource.username", mysql::getUsername);
@@ -67,6 +68,8 @@ class ChatIntegrationTest {
     @Autowired JwtEncoder encoder;
     @Autowired com.qlink.features.storage.service.VoiceCleanup voiceCleanup;
     @MockitoBean ProviderTokenVerifier verifier;
+    @MockitoBean com.qlink.features.push.PushGateway pushGateway;
+    @Autowired com.qlink.features.push.PushService push;
 
     String body(Object value) { return json.writeValueAsString(value); }
     JsonNode data(MvcResult result) throws Exception { return json.readTree(result.getResponse().getContentAsString()).get("data"); }
@@ -848,5 +851,147 @@ class ChatIntegrationTest {
             assertThat(jdbc.queryForObject("select BIN_TO_UUID(file_id) from chat_messages where id=UUID_TO_BIN(?)",String.class,id)).isEqualToIgnoringCase(file);
             payload.put("clientMessageId",key());request(a,"POST",base,payload,400);
         }
+    }
+
+    @Test void uploadKeySurvivesLostResponsesWithoutDuplicateStoredFiles() throws Exception {
+        var a=account();var b=account();String key=key();
+        var upload=new org.springframework.mock.web.MockMultipartFile("file","report.txt","text/plain","Retained report".getBytes());
+        var first=data(mvc.perform(multipart("/api/v1/storage/files").file(upload).param("uploadKey",key).header("Authorization","Bearer "+a.token())).andExpect(status().isCreated()).andReturn());
+        var retry=data(mvc.perform(multipart("/api/v1/storage/files").file(upload).param("uploadKey",key).header("Authorization","Bearer "+a.token())).andExpect(status().isCreated()).andReturn());
+        assertThat(retry.get("id")).isEqualTo(first.get("id"));
+        assertThat(jdbc.queryForObject("select count(*) from stored_files where uploaded_by=UUID_TO_BIN(?) and upload_key=UUID_TO_BIN(?)",Integer.class,a.id(),key)).isEqualTo(1);
+        assertThat(data(request(a,"GET","/api/v1/storage/files/uploads/"+key,null,200)).get("id")).isEqualTo(first.get("id"));
+        request(b,"GET","/api/v1/storage/files/uploads/"+key,null,404);
+    }
+
+    @Test void personalReceiptsAreMonotonicAuthorizedAndSynchronized() throws Exception {
+        var a=account();var b=account();var outsider=account();
+        var sent=send(a,b,key(),"Receipt");String room=sent.at("/room/id").asText(),id=sent.at("/message/id").asText();
+        String path="/api/v1/chat/rooms/"+room+"/receipts";
+        assertThat(sent.at("/message/recipientCount").asInt()).isEqualTo(1);
+        request(outsider,"POST",path,Map.of("messageIds",List.of(id),"seen",true),403);
+        try(var first=new Wire(a.token());var second=new Wire(a.token())) {
+            first.subscribe(a);second.subscribe(a);
+            var delivered=data(request(b,"POST",path,Map.of("messageIds",List.of(id),"seen",false),200));
+            assertThat(delivered.get(0).get("delivery").asText()).isEqualTo("DELIVERED");
+            for(var wire:List.of(first,second)) assertThat(wire.event().get("type").asText()).isEqualTo("MESSAGE_RECEIPT");
+            request(b,"POST",path,Map.of("messageIds",List.of(id),"seen",false),200);first.quiet();second.quiet();
+            var seen=data(request(b,"POST",path,Map.of("messageIds",List.of(id),"seen",true),200));
+            assertThat(seen.get(0).get("delivery").asText()).isEqualTo("SEEN");first.event();second.event();
+            var old=data(request(b,"POST",path,Map.of("messageIds",List.of(id),"seen",false),200));
+            assertThat(old.get(0).get("delivery").asText()).isEqualTo("SEEN");first.quiet();second.quiet();
+        }
+    }
+    @Test void groupReceiptsRequireEveryOriginalRecipientAndRespectHistory() throws Exception {
+        var owner=account();var a=account();var b=account();var late=account();
+        String room=managedGroup(owner,a),group="/api/v1/chat/groups/"+room,base="/api/v1/chat/rooms/"+room;
+        request(owner,"POST",group+"/members",Map.of("memberIds",List.of(b.id())),200);
+        var sent=data(request(owner,"POST",base+"/messages",Map.of("clientMessageId",key(),"content","Everyone"),200));String id=sent.at("/message/id").asText();
+        assertThat(sent.at("/message/recipientCount").asInt()).isEqualTo(2);
+        var one=data(request(a,"POST",base+"/receipts",Map.of("messageIds",List.of(id),"seen",true),200));
+        assertThat(one.get(0).get("delivery").asText()).isEqualTo("SENT");
+        var all=data(request(b,"POST",base+"/receipts",Map.of("messageIds",List.of(id),"seen",true),200));
+        assertThat(all.get(0).get("delivery").asText()).isEqualTo("SEEN");
+        request(owner,"POST",group+"/members",Map.of("memberIds",List.of(late.id())),200);
+        request(late,"POST",base+"/receipts",Map.of("messageIds",List.of(id),"seen",true),404);
+        jdbc.update("update chat_rooms set message_history_visibility='VIEW_ALL_MESSAGES' where id=UUID_TO_BIN(?)",room);
+        assertThat(data(request(late,"POST",base+"/receipts",Map.of("messageIds",List.of(id),"seen",true),200)).size()).isZero();
+        jdbc.update("update chat_rooms set message_history_visibility='VIEW_AFTER_JOIN' where id=UUID_TO_BIN(?)",room);
+        request(owner,"DELETE",group+"/members/"+a.id(),null,200);
+        request(owner,"POST",group+"/members",Map.of("memberIds",List.of(a.id())),200);
+        request(a,"POST",base+"/receipts",Map.of("messageIds",List.of(id),"seen",true),404);
+    }
+
+    @Test void lostResponseLookupReturnsCanonicalEditedOrDeletedMessageOnlyToSender() throws Exception {
+        var a=account();var b=account();String key=key();var sent=send(a,b,key,"Original");
+        String path="/api/v1/chat/rooms/"+sent.at("/room/id").asText()+"/messages/"+sent.at("/message/id").asText();
+        request(a,"PATCH",path,Map.of("content","Edited on another device","revision",0),200);
+        var found=data(request(a,"GET","/api/v1/chat/messages/client/"+key,null,200));
+        assertThat(found.at("/message/content").asText()).isEqualTo("Edited on another device");
+        request(b,"GET","/api/v1/chat/messages/client/"+key,null,404);
+        request(a,"DELETE",path+"?everyone=true",null,200);
+        assertThat(data(request(a,"GET","/api/v1/chat/messages/client/"+key,null,200)).at("/message/removedAt").isNull()).isFalse();
+        assertThat(jdbc.queryForObject("select count(*) from chat_event_jobs where message_id=UUID_TO_BIN(?)",Integer.class,sent.at("/message/id").asText())).isEqualTo(3);
+    }
+
+    @Test void pushDevicesMuteLogoutAndInvalidTokenCleanup() throws Exception {
+        var a=account();var b=account();var outsider=account();String deviceA=key(),deviceB=key(),deviceB2=key();
+        request(a,"PUT","/api/v1/push/devices/"+deviceA,Map.of("token","sender-device","platform","ANDROID"),200);
+        request(b,"PUT","/api/v1/push/devices/"+deviceB,Map.of("token","recipient-device","platform","IOS"),200);
+        request(b,"PUT","/api/v1/push/devices/"+deviceB2,Map.of("token","recipient-device-2","platform","ANDROID"),200);
+        request(b,"PUT","/api/v1/push/devices/"+deviceB,Map.of("token","recipient-device-refreshed","platform","IOS"),200);
+        assertThat(jdbc.queryForObject("select count(*) from push_devices where user_id=UUID_TO_BIN(?)",Integer.class,b.id())).isEqualTo(2);
+        when(pushGateway.enabled()).thenReturn(true);
+        var sent=send(a,b,key(),"Private message text never passed to gateway");String room=sent.at("/room/id").asText(),message=sent.at("/message/id").asText();
+        assertThat(jdbc.queryForObject("select count(*) from push_deliveries where message_id=UUID_TO_BIN(?)",Integer.class,message)).isEqualTo(2);
+        for(String id:jdbc.queryForList("select BIN_TO_UUID(id) from push_deliveries where message_id=UUID_TO_BIN(?)",String.class,message)) push.dispatch(UUID.fromString(id));
+        verify(pushGateway,times(2)).send(any(),eq(UUID.fromString(room)),eq(UUID.fromString(message)),eq(UUID.fromString(b.id())),any());
+        request(outsider,"PUT","/api/v1/chat/rooms/"+room+"/notifications",Map.of("muted",true),403);
+        request(b,"PUT","/api/v1/chat/rooms/"+room+"/notifications",Map.of("muted",true),200);
+        assertThat(data(request(b,"GET","/api/v1/chat/rooms/"+room+"/notifications",null,200)).get("muted").asBoolean()).isTrue();
+        String muted=send(a,b,key(),"Muted").at("/message/id").asText();
+        assertThat(jdbc.queryForObject("select count(*) from push_deliveries where message_id=UUID_TO_BIN(?)",Integer.class,muted)).isZero();
+        request(b,"PUT","/api/v1/chat/rooms/"+room+"/notifications",Map.of("muted",false),200);
+        doThrow(new com.qlink.features.push.PushGateway.InvalidToken()).when(pushGateway).send(any(),any(),any(),any(),any());
+        String invalid=send(a,b,key(),"Invalid devices").at("/message/id").asText();
+        for(String id:jdbc.queryForList("select BIN_TO_UUID(id) from push_deliveries where message_id=UUID_TO_BIN(?)",String.class,invalid)) push.dispatch(UUID.fromString(id));
+        assertThat(jdbc.queryForObject("select count(*) from push_devices where user_id=UUID_TO_BIN(?)",Integer.class,b.id())).isZero();
+        request(a,"POST","/api/v1/auth/signout",null,200);
+        assertThat(jdbc.queryForObject("select count(*) from push_devices where user_id=UUID_TO_BIN(?)",Integer.class,a.id())).isZero();
+    }
+    @Test void disabledPushDoesNotQueueAndRegistrationIsAccountScoped() throws Exception {
+        var a=account();var b=account();String installation=key(),token="account-switch-"+key();
+        request(a,"PUT","/api/v1/push/devices/"+installation,Map.of("token",token,"platform","ANDROID"),200);
+        when(pushGateway.enabled()).thenReturn(false);
+        String disabled=send(a,b,key(),"Push disabled").at("/message/id").asText();
+        assertThat(jdbc.queryForObject("select count(*) from push_deliveries where message_id=UUID_TO_BIN(?)",Integer.class,disabled)).isZero();
+        when(pushGateway.enabled()).thenReturn(true);
+        String queued=send(b,a,key(),"Before account switch").at("/message/id").asText();
+        request(b,"PUT","/api/v1/push/devices/"+installation,Map.of("token",token,"platform","ANDROID"),200);
+        request(a,"DELETE","/api/v1/push/devices/"+installation,null,200);
+        assertThat(jdbc.queryForObject("select BIN_TO_UUID(user_id) from push_devices where installation_id=UUID_TO_BIN(?)",String.class,installation)).isEqualTo(b.id());
+        for(String id:jdbc.queryForList("select BIN_TO_UUID(id) from push_deliveries where message_id=UUID_TO_BIN(?)",String.class,queued)) push.dispatch(UUID.fromString(id));
+        verify(pushGateway,never()).send(any(),any(),any(),any(),any());
+        // One token cannot remain registered to two installations/accounts.
+        request(a,"PUT","/api/v1/push/devices/"+key(),Map.of("token",token,"platform","ANDROID"),200);
+        assertThat(jdbc.queryForObject("select count(*) from push_devices where token=?",Integer.class,token)).isEqualTo(1);
+        request(a,"PUT","/api/v1/push/devices/"+key(),Map.of("token","","platform","ANDROID"),400);
+        request(a,"PUT","/api/v1/push/devices/"+key(),Map.of("token",token,"platform","WEB"),400);
+    }
+
+    @Test void pushRetriesFailuresAndRechecksMuteBeforeDispatch() throws Exception {
+        var a=account();var b=account();
+        request(b,"PUT","/api/v1/push/devices/"+key(),Map.of("token","retry-"+key(),"platform","ANDROID"),200);
+        when(pushGateway.enabled()).thenReturn(true);
+        var sent=send(a,b,key(),"Retry test");String message=sent.at("/message/id").asText(),room=sent.at("/room/id").asText();
+        String job=jdbc.queryForObject("select BIN_TO_UUID(id) from push_deliveries where message_id=UUID_TO_BIN(?)",String.class,message);
+        doThrow(new java.io.IOException("sensitive-provider-details")).when(pushGateway).send(any(),any(),any(),any(),any());
+        push.dispatch(UUID.fromString(job));
+        assertThat(jdbc.queryForObject("select attempts from push_deliveries where id=UUID_TO_BIN(?)",Integer.class,job)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select finished_at is null from push_deliveries where id=UUID_TO_BIN(?)",Boolean.class,job)).isTrue();
+        push.dispatch(UUID.fromString(job)); // Backoff prevents immediate resend.
+        verify(pushGateway,times(1)).send(any(),any(),any(),any(),any());
+        doNothing().when(pushGateway).send(any(),any(),any(),any(),any());
+        jdbc.update("update push_deliveries set next_attempt_at=UTC_TIMESTAMP()-INTERVAL 1 SECOND where id=UUID_TO_BIN(?)",job);
+        push.dispatch(UUID.fromString(job));push.dispatch(UUID.fromString(job));
+        verify(pushGateway,times(2)).send(any(),any(),any(),any(),any());
+        String muted=send(a,b,key(),"Mute after enqueue").at("/message/id").asText();
+        request(b,"PUT","/api/v1/chat/rooms/"+room+"/notifications",Map.of("muted",true),200);
+        for(String id:jdbc.queryForList("select BIN_TO_UUID(id) from push_deliveries where message_id=UUID_TO_BIN(?)",String.class,muted)) push.dispatch(UUID.fromString(id));
+        verify(pushGateway,never()).send(any(),any(),eq(UUID.fromString(muted)),any(),any());
+    }
+
+    @Test void groupPushTargetsOnlyActiveVisibleRecipients() throws Exception {
+        var owner=account();var member=account();String room=managedGroup(owner,member);
+        request(owner,"PUT","/api/v1/push/devices/"+key(),Map.of("token","group-owner-token","platform","ANDROID"),200);
+        request(member,"PUT","/api/v1/push/devices/"+key(),Map.of("token","group-member-token","platform","IOS"),200);
+        when(pushGateway.enabled()).thenReturn(true);
+        String visible=data(request(owner,"POST","/api/v1/chat/rooms/"+room+"/messages",Map.of("clientMessageId",key(),"content","Visible group message"),200)).at("/message/id").asText();
+        for(String id:jdbc.queryForList("select BIN_TO_UUID(id) from push_deliveries where message_id=UUID_TO_BIN(?)",String.class,visible)) push.dispatch(UUID.fromString(id));
+        verify(pushGateway).send(any(),eq(UUID.fromString(room)),eq(UUID.fromString(visible)),eq(UUID.fromString(member.id())),any());
+        String message=data(request(owner,"POST","/api/v1/chat/rooms/"+room+"/messages",Map.of("clientMessageId",key(),"content","Group message"),200)).at("/message/id").asText();
+        request(owner,"DELETE","/api/v1/chat/groups/"+room+"/members/"+member.id(),null,200);
+        for(String id:jdbc.queryForList("select BIN_TO_UUID(id) from push_deliveries where message_id=UUID_TO_BIN(?)",String.class,message)) push.dispatch(UUID.fromString(id));
+        verify(pushGateway,never()).send(any(),any(),eq(UUID.fromString(message)),any(),any());
     }
 }

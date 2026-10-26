@@ -26,6 +26,9 @@ import java.util.*;
 public class ChatService {
  @jakarta.persistence.PersistenceContext private jakarta.persistence.EntityManager entityManager;
  @org.springframework.beans.factory.annotation.Autowired private MessageHiddenRepository hidden;
+ @org.springframework.beans.factory.annotation.Autowired private MessageReceiptRepository receipts;
+ @org.springframework.beans.factory.annotation.Autowired private ChatEventJobRepository eventJobs;
+ @org.springframework.beans.factory.annotation.Autowired private com.qlink.features.push.PushService push;
  private final ChatRoomRepository rooms; private final ChatMemberRepository members;
  private final ChatMessageRepository messages; private final UserRepository users;
  private final UserService current; private final DiscoveryService discovery;
@@ -99,7 +102,55 @@ public class ChatService {
   }
   return new Message(m.getId(),m.getRoomId(),m.getSenderId(),m.getClientMessageId(),m.getType().name(),hide||removed?"":m.getContent(),m.getCreatedAt().truncatedTo(java.time.temporal.ChronoUnit.MICROS),
    users.findById(m.getSenderId()).map(u -> u.getDisplayName()).orElse("Unavailable user"),hide||removed?null:m.getFileId(),hide||removed?null:m.getDurationMs(),hide||removed?null:m.getAudioContentType(),hide||removed?null:m.getAudioSizeBytes(),hide||removed?null:voiceFiles.describe(m),
-   m.getReplyToId(),reply,m.getEditedAt(),m.getRemovedAt(),m.getRevision(),hide,!hide&&!removed&&canDelete(viewer,m));
+   m.getReplyToId(),reply,m.getEditedAt(),m.getRemovedAt()==null?m.getDeletedAt():m.getRemovedAt(),m.getRevision(),hide,!hide&&!removed&&canDelete(viewer,m),delivery(m),m.getRecipientCount(),m.getDeliveredCount(),m.getSeenCount());
+ }
+ private void publishMessage(UUID id,String type,UUID onlyUser) {
+  if("MESSAGE_CREATED".equals(type)) push.enqueue(messages.findById(id).orElseThrow());
+  var job=new ChatEventJob();job.setMessageId(id);job.setEventType(type);job.setOnlyUser(onlyUser);job.setNextAttemptAt(Instant.now());eventJobs.saveAndFlush(job);
+  events.publishEvent(new com.qlink.features.chat.realtime.MessageCommitted(id,type,onlyUser,job.getId()));
+ }
+ public Sent sentByClient(UUID viewer,UUID key) {
+  current.requireActive(viewer);
+  var message=messages.previous(viewer,key).orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND,"MESSAGE_NOT_FOUND","Message not committed"));
+  var room=requireRoom(viewer,message.getRoomId());
+  var since=historyStart(viewer,room);
+  if(since!=null && message.getCreatedAt().isBefore(since)) throw new ApiException(HttpStatus.FORBIDDEN,"MESSAGE_HISTORY_HIDDEN","Message is outside your visible history");
+  return new Sent(roomDto(viewer,room),messageDto(viewer,message));
+ }
+ private String delivery(ChatMessage m) {
+  if(m.getRecipientCount()==0) return "SENT";
+  return m.getSeenCount()>=m.getRecipientCount()?"SEEN":m.getDeliveredCount()>=m.getRecipientCount()?"DELIVERED":"SENT";
+ }
+ private void captureRecipients(ChatMessage m) {
+  int count=0;
+  for(var member:members.findByRoomId(m.getRoomId())) {
+   if(member.getUserId().equals(m.getSenderId()) || users.findById(member.getUserId()).filter(u -> u.getStatus()==com.qlink.features.user.enums.UserStatus.ACTIVE).isEmpty()) continue;
+   var receipt=new MessageReceipt();receipt.setMessageId(m.getId());receipt.setUserId(member.getUserId());receipt.setMembershipId(member.getId());receipts.save(receipt);count++;
+  }
+  m.setRecipientCount(count);messages.flush();
+ }
+ @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+ public List<Message> acknowledge(UUID viewer,UUID roomId,Receipts request) {
+  rooms.lockById(roomId).orElseThrow(() -> bad("Room unavailable"));
+  var room=requireRoom(viewer,roomId);var member=membership(viewer,roomId);
+  var result=new ArrayList<Message>();
+  for(UUID id:new LinkedHashSet<>(request.messageIds())) {
+   var m=visibleMessage(viewer,room,id);
+   if(m.getSenderId().equals(viewer) || isHidden(viewer,id) || m.getRemovedAt()!=null) continue;
+   var receipt=receipts.findByMessageIdAndUserId(id,viewer).orElse(null);
+   // Visible old history does not make a newly joined member an original recipient.
+   if(receipt==null || !receipt.getMembershipId().equals(member.getId())) continue;
+   boolean changed=false;
+   Instant now=Instant.now();
+   if(receipt.getDeliveredAt()==null) {receipt.setDeliveredAt(now);m.setDeliveredCount(m.getDeliveredCount()+1);changed=true;}
+   if(request.seen() && receipt.getSeenAt()==null) {receipt.setSeenAt(now);m.setSeenCount(m.getSeenCount()+1);changed=true;}
+   if(changed) {
+    receipts.flush();messages.flush();
+    publishMessage(id,"MESSAGE_RECEIPT",null);
+   }
+   result.add(messageDto(viewer,m));
+  }
+  return result;
  }
  private ChatMessage visibleMessage(UUID viewer,ChatRoom room,UUID id) {
   var m=messages.findById(id).orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND,"MESSAGE_NOT_FOUND","Message unavailable"));
@@ -126,7 +177,7 @@ public class ChatService {
   if(request.content()==null || request.content().isBlank() || request.content().length()>4000) throw bad("Message must contain 1–4000 characters");
   if(request.revision()==null || request.revision()!=m.getRevision()) throw new ApiException(HttpStatus.CONFLICT,"STALE_MESSAGE","Message changed; refresh before editing");
   m.setContent(request.content());m.setEditedAt(Instant.now());m.setRevision(m.getRevision()+1);messages.flush();
-  events.publishEvent(new com.qlink.features.chat.realtime.MessageCommitted(id,"MESSAGE_UPDATED",null));
+  publishMessage(id,"MESSAGE_UPDATED",null);
   return messageDto(viewer,m);
  }
  @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
@@ -142,7 +193,7 @@ public class ChatService {
   } else if(!isHidden(viewer,id)) {
    var h=new MessageHidden();h.setMessageId(id);h.setUserId(viewer);hidden.saveAndFlush(h);
   }
-  events.publishEvent(new com.qlink.features.chat.realtime.MessageCommitted(id,everyone?"MESSAGE_UPDATED":"MESSAGE_HIDDEN",everyone?null:viewer));
+  publishMessage(id,everyone?"MESSAGE_UPDATED":"MESSAGE_HIDDEN",everyone?null:viewer);
   return messageDto(viewer,m);
  }
  private Room roomDto(UUID viewer,ChatRoom room) {
@@ -277,8 +328,8 @@ public class ChatService {
    if(messageType==MessageType.VOICE) voiceFiles.attach(sender,message,fileId,durationMs);
    else if(fileId!=null) voiceFiles.attachFile(sender,message,fileId,messageType);
    reply(sender,room,message,replyToId);
-   messages.saveAndFlush(message);room.setLastMessageAt(message.getCreatedAt());rooms.saveAndFlush(room);
-   events.publishEvent(new com.qlink.features.chat.realtime.MessageCommitted(message.getId()));
+   messages.saveAndFlush(message);captureRecipients(message);room.setLastMessageAt(message.getCreatedAt());rooms.saveAndFlush(room);
+   publishMessage(message.getId(),"MESSAGE_CREATED",null);
    return new Sent(roomDto(sender,room),messageDto(sender,message));
   }
   UUID other=recipient;
@@ -310,9 +361,9 @@ public class ChatService {
   message.setClientMessageId(key); message.setContent(content); if(messageType==MessageType.VOICE) voiceFiles.attach(sender,message,fileId,durationMs);
    else if(fileId!=null) voiceFiles.attachFile(sender,message,fileId,messageType);
    reply(sender,room,message,replyToId);
-   messages.saveAndFlush(message);
+   messages.saveAndFlush(message);captureRecipients(message);
   room.setLastMessageAt(message.getCreatedAt()); rooms.saveAndFlush(room);
-  events.publishEvent(new com.qlink.features.chat.realtime.MessageCommitted(message.getId()));
+  publishMessage(message.getId(),"MESSAGE_CREATED",null);
   return new Sent(roomDto(sender,room),messageDto(sender,message));
  }
 }

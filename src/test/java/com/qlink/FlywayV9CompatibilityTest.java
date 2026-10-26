@@ -25,7 +25,7 @@ class FlywayV9CompatibilityTest {
   member(db,valid,a,"CO_OWNER");member(db,valid,b,"OWNER");
   member(db,fallback,b,"MEMBER");
   var before=db.queryForList("select BIN_TO_UUID(user_id) user_id,role from chat_room_members where room_id=UUID_TO_BIN(?) order by user_id",valid);
-  var current=Flyway.configure().dataSource(source).load();
+  var current=Flyway.configure().dataSource(source).target("11").load();
   assertThat(current.migrate().migrationsExecuted).isEqualTo(2);
   current.validate();
   assertThat(db.queryForObject("select checksum from flyway_schema_history where version='9'",Integer.class)).isEqualTo(-2128036722);

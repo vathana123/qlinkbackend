@@ -39,9 +39,13 @@ public class StorageController {
         @io.swagger.v3.oas.annotations.responses.ApiResponse(responseCode="503",description="Storage unavailable")
     })
     public ResponseEntity<ApiResponse<StoredFileResponse>> upload(@AuthenticationPrincipal Jwt jwt,
-            @RequestPart("file") MultipartFile file, @RequestParam(required=false) FileCategory category, @RequestParam(defaultValue="false") boolean voice) {
+            @RequestPart("file") MultipartFile file, @RequestParam(required=false) FileCategory category, @RequestParam(defaultValue="false") boolean voice, @RequestParam(required=false) UUID uploadKey) {
         return ResponseEntity.status(HttpStatus.CREATED).cacheControl(CacheControl.noStore())
-            .body(ApiResponse.ok("File uploaded",service.upload(jwt,file,category,voice)));
+            .body(ApiResponse.ok("File uploaded",service.upload(jwt,file,category,voice,uploadKey)));
+    }
+    @GetMapping("/uploads/{key}")
+    public ApiResponse<StoredFileResponse> uploaded(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID key) {
+        return ApiResponse.ok("Upload",service.uploaded(jwt,key));
     }
     @GetMapping("/{fileId}") @Operation(summary="Get private file metadata (owner, authorized message participant, or authenticated profile-avatar viewer)")
     public ResponseEntity<ApiResponse<StoredFileResponse>> metadata(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID fileId) {

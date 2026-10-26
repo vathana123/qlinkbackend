@@ -23,6 +23,7 @@ public class StorageService {
         @Override public void close() throws IOException { stream.close(); }
     }
     private static final Logger log=LoggerFactory.getLogger(StorageService.class);
+    @org.springframework.beans.factory.annotation.Autowired private com.qlink.features.user.repository.UserRepository users;
     private final FileStorageProvider provider;
     private final VoiceFiles voiceFiles;
     private final StoredFileRepository files;
@@ -44,6 +45,16 @@ public class StorageService {
         return upload(jwt,input,category,false);
     }
     public StoredFileResponse upload(Jwt jwt, MultipartFile input, FileCategory category, boolean voice) {
+        return upload(jwt,input,category,voice,null);
+    }
+    public StoredFileResponse uploaded(Jwt jwt,UUID key) {
+        return transaction.execute(tx -> {
+            var file=files.byUploadKey(access.actor(jwt),key).orElseThrow(StorageErrors::missing);
+            if(file.getDeletedAt()!=null) throw StorageErrors.missing();
+            return mapper.toResponse(file);
+        });
+    }
+    public StoredFileResponse upload(Jwt jwt,MultipartFile input,FileCategory category,boolean voice,UUID uploadKey) {
         UUID actor=access.actor(jwt);
         if(voice) {
             if(input.getSize()>VoiceFiles.MAX_BYTES) throw StorageErrors.tooLarge();
@@ -61,16 +72,31 @@ public class StorageService {
                 bytes=provider.store(stream,key,properties.maxFileSize().toBytes(),in -> content.detect(in,name,category));
                 stored=true;
             }
-            return transaction.execute(tx -> {
+            var result=transaction.execute(tx -> {
                 // Recheck identity before publication after a potentially slow upload.
                 access.recheck(jwt);
+                if(uploadKey!=null) {
+                    users.lockById(actor).orElseThrow(StorageErrors::missing);
+                    var previous=files.byUploadKey(actor,uploadKey);
+                    if(previous.isPresent()) {
+                        var old=previous.get();
+                        if(old.getDeletedAt()!=null || !old.getChecksumSha256().equals(bytes.sha256()) || old.isVoiceRecording()!=voice)
+                            throw new ApiException(org.springframework.http.HttpStatus.CONFLICT,"UPLOAD_CONFLICT","Upload identifier already used");
+                        return mapper.toResponse(old);
+                    }
+                }
                 var file=new StoredFile();
-                file.setVoiceRecording(voice); file.setOriginalName(name); file.setStorageKey(key); file.setContentType(bytes.contentType());
+                file.setUploadKey(uploadKey); file.setVoiceRecording(voice); file.setOriginalName(name); file.setStorageKey(key); file.setContentType(bytes.contentType());
                 file.setSizeBytes(bytes.size()); file.setChecksumSha256(bytes.sha256());
                 file.setCategory(content.category(bytes.contentType())); file.setUploadedBy(actor);
                 file.setStatus(StoredFileStatus.AVAILABLE);
                 return mapper.toResponse(files.saveAndFlush(file));
             });
+            if(uploadKey!=null) {
+                var retained=transaction.execute(tx -> files.findById(result.id()).orElseThrow().getStorageKey());
+                if(!key.equals(retained)) provider.delete(key);
+            }
+            return result;
         } catch (IOException | RuntimeException ex) {
             if (stored) {
                 try { provider.delete(key); }

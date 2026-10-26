@@ -26,6 +26,16 @@ public class ChatController {
  public ApiResponse<java.util.List<GroupMember>> members(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID roomId) {
   return ApiResponse.ok("Members",service.groupMembers(viewer(jwt),roomId));
  }
+ @GetMapping("/rooms/{roomId}")
+ public ApiResponse<Room> room(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID roomId){return ApiResponse.ok("Room",service.room(viewer(jwt),roomId));}
+ @GetMapping("/messages/client/{key}")
+ public ApiResponse<Sent> sentByClient(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID key) {
+  return ApiResponse.ok("Committed message",service.sentByClient(viewer(jwt),key));
+ }
+ @PostMapping("/rooms/{roomId}/receipts")
+ public ApiResponse<java.util.List<Message>> receipts(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID roomId,@Valid @RequestBody Receipts request) {
+  return ApiResponse.ok("Receipts",service.acknowledge(viewer(jwt),roomId,request));
+ }
  @PatchMapping("/rooms/{roomId}/messages/{id}")
  public ApiResponse<Message> edit(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID roomId,@PathVariable UUID id,@Valid @RequestBody Edit request) {
   return ApiResponse.ok("Message edited",service.edit(viewer(jwt),roomId,id,request));
