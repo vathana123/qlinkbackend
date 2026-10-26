@@ -1,4 +1,5 @@
 package com.qlink.security.jwt;
+import lombok.RequiredArgsConstructor;
 import org.springframework.security.oauth2.jwt.*;
 import org.springframework.security.oauth2.jose.jws.SignatureAlgorithm;
 import org.springframework.stereotype.Service;
@@ -6,12 +7,11 @@ import java.time.Instant;
 import java.util.UUID;
 
 @Service
+@RequiredArgsConstructor
 public class TokenService {
     private final JwtEncoder encoder;
     private final JwtProperties properties;
-    public TokenService(JwtEncoder encoder, JwtProperties properties) {
-        this.encoder = encoder; this.properties = properties;
-    }
+
     public String access(UUID user, UUID session) {
         return encode(user, session, "access", Instant.now().plus(properties.accessTtl()));
     }

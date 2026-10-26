@@ -1,4 +1,5 @@
 package com.qlink.features.auth.service;
+import lombok.RequiredArgsConstructor;
 import com.qlink.common.exception.ApiException;
 import com.qlink.features.auth.dto.*;
 import com.qlink.features.auth.entity.NonceChallenge;
@@ -13,10 +14,11 @@ import java.time.Instant;
 import java.util.Base64;
 
 @Service
+@RequiredArgsConstructor
 public class NonceService {
     private final NonceChallengeRepository challenges;
     private final SecureRandom random = new SecureRandom();
-    public NonceService(NonceChallengeRepository challenges) { this.challenges = challenges; }
+
     @Transactional
     public NonceResponse issue(AuthProvider provider) {
         byte[] bytes = new byte[32]; random.nextBytes(bytes);

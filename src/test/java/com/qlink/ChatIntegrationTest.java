@@ -64,6 +64,7 @@ class ChatIntegrationTest {
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
     @Autowired JdbcTemplate jdbc;
+    @Autowired org.flywaydb.core.Flyway flyway;
     @Autowired UserService users;
     @Autowired JwtEncoder encoder;
     @Autowired com.qlink.features.storage.service.VoiceCleanup voiceCleanup;
@@ -104,6 +105,144 @@ class ChatIntegrationTest {
     JsonNode send(Account a,Account b,String key,String content) throws Exception {
         return data(request(a,"POST","/api/v1/chat/personal/messages",first(b,key,content),200));
     }
+    @Test void searchPersonalRoomsMessagesAndPrivateFields() throws Exception {
+        var a=account(); var b=account(); var outsider=account();
+        jdbc.update("update users set display_name='Search Friend',username='search_friend' where id=UUID_TO_BIN(?)", b.id());
+        var sent=send(a,b,key(),"Search needle hello");
+        String room=sent.get("room").get("id").asText();
+        var conversations=data(request(a,"GET","/api/v1/chat/search/rooms?q=FRIEND",null,200));
+        assertThat(conversations.get("items").size()).isEqualTo(1);
+        assertThat(conversations.get("items").get(0).get("participant").has("email")).isFalse();
+        var matches=data(request(a,"GET","/api/v1/chat/search/messages?q=needle",null,200));
+        assertThat(matches.get("items").get(0).get("message").get("id")).isEqualTo(sent.get("message").get("id"));
+        assertThat(matches.get("items").get(0).get("room").get("id").asText()).isEqualTo(room);
+        assertThat(data(request(outsider,"GET","/api/v1/chat/search/messages?q=needle",null,200)).get("items").isEmpty()).isTrue();
+        assertThat(data(request(outsider,"GET","/api/v1/chat/search/rooms?q=friend",null,200)).get("items").isEmpty()).isTrue();
+        request(outsider,"GET","/api/v1/chat/rooms/"+room+"/search?q=needle",null,403);
+        request(a,"GET","/api/v1/chat/search/messages?q=x",null,400);
+        request(a,"GET","/api/v1/chat/search/messages?q=needle&size=51",null,400);
+        request(a,"GET","/api/v1/chat/search/messages?q=needle&cursor=invalid",null,400);
+        request(a,"GET","/api/v1/chat/search/messages?q=needle&from=2026-02-01T00:00:00Z&to=2026-01-01T00:00:00Z",null,400);
+    }
+
+    @Test void searchGroupMembershipHistoryAndDeletionAreEnforced() throws Exception {
+        var a=account(); var b=account(); var outsider=account();
+        for (String policy:List.of("VIEW_ALL_MESSAGES","VIEW_AFTER_JOIN")) {
+            String room=managedGroup(a,b,policy);
+            var sent=data(request(a,"POST","/api/v1/chat/rooms/"+room+"/messages",Map.of("clientMessageId",key(),"content","history needle"),200));
+            String id=sent.get("message").get("id").asText();
+            String path="/api/v1/chat/rooms/"+room+"/search?q=needle";
+            String context="/api/v1/chat/rooms/"+room+"/messages/"+id+"/context";
+            jdbc.update("update chat_messages set created_at='2026-01-01' where id=UUID_TO_BIN(?)",id);
+            jdbc.update("update chat_room_members set joined_at='2026-01-01' where room_id=UUID_TO_BIN(?) and user_id=UUID_TO_BIN(?)",room,a.id());
+            jdbc.update("update chat_room_members set joined_at='2026-01-02' where room_id=UUID_TO_BIN(?) and user_id=UUID_TO_BIN(?)",room,b.id());
+            int expected=policy.equals("VIEW_ALL_MESSAGES")?1:0;
+            assertThat(data(request(b,"GET",path,null,200)).get("items").size()).isEqualTo(expected);
+            assertThat(data(request(b,"GET","/api/v1/chat/search/messages?q=needle",null,200)).get("items").size()).isEqualTo(expected);
+            request(b,"GET",context,null,expected==1?200:404);
+            request(outsider,"GET",path,null,403);
+            assertThat(data(request(b,"GET","/api/v1/chat/search/rooms?q=managed",null,200)).get("items").size()).isEqualTo(1);
+            // At the membership boundary the message is visible.
+            jdbc.update("update chat_room_members set joined_at='2026-01-01' where room_id=UUID_TO_BIN(?) and user_id=UUID_TO_BIN(?)",room,b.id());
+            assertThat(data(request(b,"GET",path,null,200)).get("items").size()).isEqualTo(1);
+            request(b,"DELETE","/api/v1/chat/rooms/"+room+"/messages/"+id,null,200);
+            assertThat(data(request(b,"GET",path,null,200)).get("items").isEmpty()).isTrue();
+            assertThat(data(request(b,"GET","/api/v1/chat/search/messages?q=needle",null,200)).get("items").isEmpty()).isTrue();
+            request(b,"GET",context,null,404);
+            assertThat(data(request(a,"GET",path,null,200)).get("items").size()).isEqualTo(1);
+            request(a,"DELETE","/api/v1/chat/rooms/"+room+"/messages/"+id+"?everyone=true",null,200);
+            assertThat(data(request(a,"GET",path,null,200)).get("items").isEmpty()).isTrue();
+            request(a,"GET",context,null,404);
+            jdbc.update("update chat_room_members set deleted_at=UTC_TIMESTAMP(6) where room_id=UUID_TO_BIN(?) and user_id=UUID_TO_BIN(?)",room,b.id());
+            request(b,"GET",path,null,403);
+            assertThat(data(request(b,"GET","/api/v1/chat/search/rooms?q=managed",null,200)).get("items").isEmpty()).isTrue();
+        }
+    }
+
+    @Test void searchConversationPagesIncludeOnlyAccessiblePersonalAndGroupRooms() throws Exception {
+        var a=account(); var b=account(); var c=account(); var outsider=account();
+        jdbc.update("update users set display_name='Needle Bob' where id=UUID_TO_BIN(?)",b.id());
+        jdbc.update("update users set display_name='Needle Carol' where id=UUID_TO_BIN(?)",c.id());
+        send(a,b,key(),"contact"); send(a,c,key(),"contact");
+        for(String type:List.of("GROUP_PRIVATE","GROUP_PUBLIC"))
+            request(a,"POST","/api/v1/chat/groups",Map.of("name","Needle group","type",type,"memberIds",List.of(b.id())),200);
+        var ids=new ArrayList<String>(); String cursor=null;
+        do {
+            var page=data(request(a,"GET","/api/v1/chat/search/rooms?q=needle&size=1"+(cursor==null?"":"&cursor="+cursor),null,200));
+            for(var item:page.get("items")) ids.add(item.get("id").asText());
+            cursor=page.get("nextCursor").isNull()?null:page.get("nextCursor").asText();
+        } while(cursor!=null && ids.size()<10);
+        assertThat(ids).hasSize(4).doesNotHaveDuplicates();
+        assertThat(data(request(outsider,"GET","/api/v1/chat/search/rooms?q=needle",null,200)).get("items").isEmpty()).isTrue();
+        jdbc.update("update chat_rooms set deleted_at=UTC_TIMESTAMP(6) where id=UUID_TO_BIN(?)",ids.get(0));
+        assertThat(data(request(a,"GET","/api/v1/chat/search/rooms?q=needle",null,200)).get("items").size()).isEqualTo(3);
+        // Verify V16 on the disposable MySQL schema, including column order.
+        assertThat(jdbc.queryForObject("select database()",String.class)).isEqualTo("qlink_test");
+        assertThat(jdbc.queryForObject("select version()",String.class)).startsWith("8.4.");
+        flyway.validate();
+        assertThat(flyway.info().pending()).isEmpty();
+        assertThat(jdbc.queryForObject("select count(*) from flyway_schema_history where version='16' and success=true",Integer.class)).isEqualTo(1);
+        var indexes=Map.of(
+            "idx_message_search_room","room_id,type,deleted_at,removed_at,created_at,id",
+            "idx_message_search_global","type,deleted_at,removed_at,created_at,id",
+            "idx_message_search_sender","sender_id,type,deleted_at,removed_at,created_at,id",
+            "idx_room_search_cursor","deleted_at,created_at,id");
+        for(var index:indexes.entrySet()) {
+            String table=index.getKey().equals("idx_room_search_cursor")?"chat_rooms":"chat_messages";
+            assertThat(jdbc.queryForObject("select group_concat(column_name order by seq_in_index separator ',') from information_schema.statistics where table_schema=database() and table_name=? and index_name=?",String.class,table,index.getKey()))
+                .as(index.getKey()).isEqualTo(index.getValue());
+        }
+    }
+
+    @Test void searchStablePaginationLiteralMatchingAndFilters() throws Exception {
+        var a=account(); var b=account(); String room=null;
+        for (int i=0;i<5;i++) room=send(a,b,key(),"literal 50%_! needle "+i).get("room").get("id").asText();
+        jdbc.update("update chat_messages set created_at='2026-01-01 00:00:00.123456' where room_id=UUID_TO_BIN(?)",room);
+        String path="/api/v1/chat/rooms/"+room+"/search?q=needle&size=2";
+        var ids=new ArrayList<String>(); String cursor=null;
+        do {
+            var page=data(request(a,"GET",path+(cursor==null?"":"&cursor="+cursor),null,200));
+            for(var match:page.get("items")) ids.add(match.get("message").get("id").asText());
+            cursor=page.get("nextCursor").isNull()?null:page.get("nextCursor").asText();
+            if(ids.size()==2) send(a,b,key(),"new needle arrives between pages");
+        } while(cursor!=null && ids.size()<10);
+        assertThat(ids).hasSize(5).doesNotHaveDuplicates();
+        assertThat(ids).isSortedAccordingTo(Comparator.reverseOrder());
+        assertThat(data(request(a,"GET",path+"&senderId="+b.id(),null,200)).get("items").isEmpty()).isTrue();
+        assertThat(data(request(a,"GET",path+"&from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z",null,200)).get("items").size()).isEqualTo(2);
+        var result=mvc.perform(get("/api/v1/chat/search/messages").param("q","50%_!")
+            .header("Authorization","Bearer "+a.token())).andExpect(status().isOk()).andReturn();
+        assertThat(data(result).get("items").size()).isEqualTo(5);
+        jdbc.update("update chat_messages set deleted_at=UTC_TIMESTAMP(6) where id=UUID_TO_BIN(?)",ids.get(0));
+        result=mvc.perform(get("/api/v1/chat/search/messages").param("q","50%_!")
+            .header("Authorization","Bearer "+a.token())).andExpect(status().isOk()).andReturn();
+        assertThat(data(result).get("items").size()).isEqualTo(4);
+        assertThat(data(request(a,"GET","/api/v1/chat/search/messages?q=absent",null,200)).get("nextCursor").isNull()).isTrue();
+    }
+
+    @Test void searchContextLoadsBoundedOlderAndNewerWindows() throws Exception {
+        var a=account(); var b=account(); var outsider=account();
+        var ids=new ArrayList<String>(); String room=null;
+        for(int i=0;i<9;i++) {
+            var sent=send(a,b,key(),"context needle "+i); room=sent.get("room").get("id").asText();
+            String id=sent.get("message").get("id").asText(); ids.add(id);
+            jdbc.update("update chat_messages set created_at=? where id=UUID_TO_BIN(?)","2026-01-01 00:00:0"+i,id);
+        }
+        String path="/api/v1/chat/rooms/"+room+"/messages";
+        var window=data(request(a,"GET",path+"/"+ids.get(4)+"/context?size=2",null,200));
+        assertThat(window.get("items").size()).isEqualTo(5);
+        assertThat(window.get("items").get(2).get("id").asText()).isEqualTo(ids.get(4));
+        var older=data(request(a,"GET",path+"?cursor="+window.get("nextCursor").asText(),null,200));
+        assertThat(older.get("items").size()).isEqualTo(2);
+        var newer=data(request(a,"GET",path+"/newer?cursor="+window.get("newerCursor").asText(),null,200));
+        assertThat(newer.get("items").size()).isEqualTo(2);
+        assertThat(newer.get("items").get(0).get("id").asText()).isEqualTo(ids.get(8));
+        assertThat(newer.get("nextCursor").isNull()).isTrue();
+        request(outsider,"GET",path+"/"+ids.get(4)+"/context",null,403);
+        String otherRoom=send(a,outsider,key(),"other conversation").get("room").get("id").asText();
+        request(a,"GET","/api/v1/chat/rooms/"+otherRoom+"/messages/"+ids.get(4)+"/context",null,404);
+    }
+
     @Test void usernamesNormalizeRemainUniqueAndKeepPublicProfilesPrivate() throws Exception {
         var a=account();var b=account();String username="member_"+key().substring(0,8);
         var saved=data(request(a,"PATCH","/api/v1/users/me/username",Map.of("username",username.toUpperCase()),200));

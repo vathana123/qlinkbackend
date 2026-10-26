@@ -1,4 +1,5 @@
 package com.qlink.features.chat.controller;
+import lombok.RequiredArgsConstructor;
 import com.qlink.common.response.ApiResponse;
 import com.qlink.features.chat.dto.ChatDtos.*;
 import com.qlink.features.chat.service.ChatService;
@@ -11,9 +12,10 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.data.domain.Page;
 import java.util.UUID;
 @RestController @RequestMapping("/api/v1/chat") @SecurityRequirement(name="bearerAuth")
+@RequiredArgsConstructor
 public class ChatController {
  private final ChatService service;
- public ChatController(ChatService service) { this.service=service; }
+
  @PostMapping("/groups")
  public ApiResponse<Room> createGroup(@AuthenticationPrincipal Jwt jwt,@RequestBody CreateGroup request) {
   return ApiResponse.ok("Group created",service.createGroup(viewer(jwt),request));

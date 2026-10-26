@@ -1,4 +1,5 @@
 package com.qlink.features.user.controller;
+import lombok.RequiredArgsConstructor;
 import com.qlink.common.response.ApiResponse;
 import com.qlink.features.user.dto.*;
 import com.qlink.features.user.service.DiscoveryService;
@@ -11,10 +12,11 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.data.domain.Page;
 import java.util.UUID;
 @RestController @RequestMapping("/api/v1/users") @SecurityRequirement(name="bearerAuth")
+@RequiredArgsConstructor
 public class UserController {
     private final DiscoveryService service;
     private final com.qlink.features.user.service.ProfileService profile;
-    public UserController(DiscoveryService service, com.qlink.features.user.service.ProfileService profile) { this.service=service; this.profile=profile; }
+
     @PatchMapping("/me") @Operation(summary="Update your display name and/or username", description="Null or omitted fields stay unchanged. Usernames are case-insensitively unique; conflicts return 409.")
     public ApiResponse<UserResponse> profile(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody ProfileRequest request) {
         return ApiResponse.ok("Profile saved",profile.update(jwt,request));

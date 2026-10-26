@@ -1,14 +1,15 @@
 package com.qlink.features.chat.realtime;
+import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.*;
 import org.slf4j.*;
 @Component
+@RequiredArgsConstructor
 public class ChatEventListener {
  private static final Logger log=LoggerFactory.getLogger(ChatEventListener.class);
- @org.springframework.beans.factory.annotation.Autowired private ChatEventRecovery recovery;
  private final ChatEventDelivery delivery;
  private final com.qlink.features.storage.service.StorageCleanupService cleanup;
- public ChatEventListener(ChatEventDelivery delivery,com.qlink.features.storage.service.StorageCleanupService cleanup) {this.delivery=delivery;this.cleanup=cleanup;}
+ private final ChatEventRecovery recovery;
  @TransactionalEventListener(phase=TransactionPhase.AFTER_COMMIT)
  public void groupChanged(GroupChanged event) {
   try {delivery.deliver(event);}

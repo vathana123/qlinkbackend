@@ -1,4 +1,5 @@
 package com.qlink.features.user.service;
+import lombok.RequiredArgsConstructor;
 
 import com.qlink.common.exception.ApiException;
 import org.springframework.http.HttpStatus;
@@ -9,9 +10,10 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.UUID;
 
 @Service
+@RequiredArgsConstructor
 public class SearchRateLimiter {
     private final JdbcTemplate jdbc;
-    public SearchRateLimiter(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+
 
     // Independent transaction: a failed/invalid search still consumes its allowance.
     @Transactional(propagation = Propagation.REQUIRES_NEW)

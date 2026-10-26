@@ -1,4 +1,5 @@
 package com.qlink.features.auth.controller;
+import lombok.RequiredArgsConstructor;
 import com.qlink.common.response.ApiResponse;
 import com.qlink.features.auth.dto.*;
 import com.qlink.features.auth.service.*;
@@ -16,14 +17,13 @@ import java.util.UUID;
 
 @RestController @RequestMapping("/api/v1/auth")
 @Tag(name = "Authentication", description = "Google and Apple ID-token authentication; application JWT sessions")
+@RequiredArgsConstructor
 public class AuthController {
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(AuthController.class);
     private final AuthService auth;
     private final UserService users;
     private final NonceService nonces;
-    public AuthController(AuthService auth, UserService users, NonceService nonces) {
-        this.auth = auth; this.users = users; this.nonces = nonces;
-    }
+
     @PostMapping("/nonce")
     @Operation(summary = "Create a five-minute single-use provider nonce",
             description = "Apple: pass nonceHash to the provider SDK and raw nonce to signup/signin. Google: pass raw nonce to both.")

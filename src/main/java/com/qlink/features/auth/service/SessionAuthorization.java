@@ -1,4 +1,5 @@
 package com.qlink.features.auth.service;
+import lombok.RequiredArgsConstructor;
 
 import com.qlink.common.exception.ApiException;
 import com.qlink.features.auth.repository.AuthSessionRepository;
@@ -11,11 +12,12 @@ import java.util.UUID;
 
 /** Shared authorization after cryptographic JWT validation. Never caches across requests. */
 @Service
+@RequiredArgsConstructor
 public class SessionAuthorization {
     private static final String CHECKED = SessionAuthorization.class.getName() + ".checked";
     private final AuthSessionRepository sessions;
 
-    public SessionAuthorization(AuthSessionRepository sessions) { this.sessions = sessions; }
+
 
     public UUID actor(Jwt jwt) {
         var attributes = RequestContextHolder.getRequestAttributes();

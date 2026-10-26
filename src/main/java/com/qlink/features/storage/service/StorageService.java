@@ -23,7 +23,7 @@ public class StorageService {
         @Override public void close() throws IOException { stream.close(); }
     }
     private static final Logger log=LoggerFactory.getLogger(StorageService.class);
-    @org.springframework.beans.factory.annotation.Autowired private com.qlink.features.user.repository.UserRepository users;
+    private final com.qlink.features.user.repository.UserRepository users;
     private final FileStorageProvider provider;
     private final VoiceFiles voiceFiles;
     private final StoredFileRepository files;
@@ -35,7 +35,9 @@ public class StorageService {
     private final TransactionTemplate transaction;
     public StorageService(FileStorageProvider provider, StoredFileRepository files, StoredFileMapper mapper,
                           FileContentPolicy content, StorageAccessPolicy access, StorageCleanupService cleanup,
-                          StorageProperties properties, VoiceFiles voiceFiles, PlatformTransactionManager manager) {
+                          StorageProperties properties, VoiceFiles voiceFiles, PlatformTransactionManager manager,
+                          com.qlink.features.user.repository.UserRepository users) {
+        this.users=users;
         this.voiceFiles=voiceFiles; this.provider=provider; this.files=files; this.mapper=mapper; this.content=content;
         this.access=access; this.cleanup=cleanup; this.properties=properties;
         transaction=new TransactionTemplate(manager);

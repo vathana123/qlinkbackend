@@ -1,4 +1,5 @@
 package com.qlink.features.storage.service;
+import lombok.RequiredArgsConstructor;
 
 
 
@@ -30,11 +31,10 @@ import java.util.*;
 
 @Service
 
+@RequiredArgsConstructor
 public class VoiceFiles {
 
     public static final int MAX_BYTES=4_000_000;
-
-    private final com.qlink.features.user.repository.UserRepository users;
 
     private final StoredFileRepository files;
 
@@ -46,14 +46,9 @@ public class VoiceFiles {
 
     private final ChatMemberRepository members;
 
-    public VoiceFiles(StoredFileRepository files, FileStorageProvider provider, ChatMessageRepository messages,
+    private final com.qlink.features.user.repository.UserRepository users;
 
-                      ChatRoomRepository rooms, ChatMemberRepository members, com.qlink.features.user.repository.UserRepository users) {
-        this.users=users;
 
-        this.files=files; this.provider=provider; this.messages=messages; this.rooms=rooms; this.members=members;
-
-    }
 
     public void attach(UUID actor, ChatMessage message, UUID id, long claimedDuration) {
 

@@ -19,7 +19,7 @@ import java.util.UUID;
 
 @Service
 public class AuthService {
-    @org.springframework.beans.factory.annotation.Autowired private com.qlink.features.push.PushDeviceRepository pushDevices;
+    private final com.qlink.features.push.PushDeviceRepository pushDevices;
     private final ProviderTokenVerifier verifier;
     private final NonceService nonces;
     private final UserRepository users;
@@ -35,7 +35,9 @@ public class AuthService {
     public AuthService(ProviderTokenVerifier verifier, NonceService nonces, UserRepository users,
                        OAuthAccountRepository accounts, AuthSessionRepository sessions, RefreshTokenRepository refreshTokens,
                        UserService userService, UserMapper mapper, TokenService tokens, JwtProperties properties,
-                       @Qualifier("refreshJwtDecoder") JwtDecoder refreshDecoder) {
+                       @Qualifier("refreshJwtDecoder") JwtDecoder refreshDecoder,
+                       com.qlink.features.push.PushDeviceRepository pushDevices) {
+        this.pushDevices = pushDevices;
         this.verifier = verifier; this.nonces = nonces; this.users = users; this.accounts = accounts;
         this.sessions = sessions; this.refreshTokens = refreshTokens; this.userService = userService;
         this.mapper = mapper; this.tokens = tokens; this.properties = properties; this.refreshDecoder = refreshDecoder;

@@ -1,4 +1,5 @@
 package com.qlink.features.chat.controller;
+import lombok.RequiredArgsConstructor;
 import com.qlink.common.response.ApiResponse;
 import com.qlink.features.chat.dto.ChatDtos.*;
 import com.qlink.features.chat.service.GroupService;
@@ -10,9 +11,10 @@ import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/v1/chat/groups/{roomId}")
+@RequiredArgsConstructor
 public class GroupController {
     private final GroupService groups;
-    public GroupController(GroupService groups) { this.groups=groups; }
+
     private UUID actor(Jwt jwt) { return UUID.fromString(jwt.getSubject()); }
     @PatchMapping
     public ApiResponse<Room> update(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID roomId,@Valid @RequestBody GroupUpdate body) {

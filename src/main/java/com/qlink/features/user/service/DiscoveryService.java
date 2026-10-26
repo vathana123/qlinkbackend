@@ -1,4 +1,5 @@
 package com.qlink.features.user.service;
+import lombok.RequiredArgsConstructor;
 import com.qlink.common.exception.ApiException;
 import com.qlink.features.user.dto.*;
 import com.qlink.features.user.entity.User;
@@ -12,12 +13,11 @@ import org.springframework.data.domain.*;
 import java.util.*;
 @Service
 @Transactional(readOnly = true)
+@RequiredArgsConstructor
 public class DiscoveryService {
     private final UserRepository users; private final UserService current; private final UserMapper mapper;
     private final SearchRateLimiter searchLimits;
-    public DiscoveryService(UserRepository users, UserService current, UserMapper mapper, SearchRateLimiter searchLimits) {
-        this.users=users; this.current=current; this.mapper=mapper; this.searchLimits=searchLimits;
-    }
+
     public static String normalize(String name) {
         if (name == null) throw invalid("Username is required");
         String value = name.toLowerCase(Locale.ROOT);

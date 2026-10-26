@@ -1,4 +1,5 @@
 package com.qlink.features.chat.service;
+import lombok.RequiredArgsConstructor;
 
 import com.qlink.common.exception.ApiException;
 import com.qlink.features.chat.dto.ChatDtos.*;
@@ -20,6 +21,7 @@ import java.util.*;
 /** All group mutations lock the room before reading membership or permissions. */
 @Service
 @Transactional(isolation=Isolation.READ_COMMITTED)
+@RequiredArgsConstructor
 public class GroupService {
     private final ChatRoomRepository rooms;
     private final ChatMemberRepository members;
@@ -29,11 +31,7 @@ public class GroupService {
     private final VoiceFiles attachments;
     private final ApplicationEventPublisher events;
 
-    public GroupService(ChatRoomRepository rooms, ChatMemberRepository members, UserService users,
-            ChatService chat, StoredFileRepository files, VoiceFiles attachments, ApplicationEventPublisher events) {
-        this.rooms=rooms; this.members=members; this.users=users; this.chat=chat;
-        this.files=files; this.attachments=attachments; this.events=events;
-    }
+
     private ApiException denied() { return new ApiException(HttpStatus.FORBIDDEN,"GROUP_PERMISSION_DENIED","This group action is not permitted"); }
     private ApiException invalid(String message) { return new ApiException(HttpStatus.BAD_REQUEST,"INVALID_GROUP_ACTION",message); }
     private ChatRoom lock(UUID actor, UUID id) {
