@@ -15,6 +15,7 @@ public class ChatMessage extends BaseEntity { @Column(nullable=false,columnDefin
  @Column(nullable=false,columnDefinition="text") private String content;
  @Column(columnDefinition="binary(16)") private UUID fileId;
  private UUID replyToId;
+ @Column(columnDefinition="binary(16)") private UUID forwardedFromId;
  private Instant editedAt;
  private Instant removedAt;
  private UUID removedBy;

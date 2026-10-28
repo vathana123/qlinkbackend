@@ -148,7 +148,77 @@ public class ChatService {
         }
         return new Message(m.getId(), m.getRoomId(), m.getSenderId(), m.getClientMessageId(), m.getType().name(), hide || removed ? "" : m.getContent(), m.getCreatedAt().truncatedTo(java.time.temporal.ChronoUnit.MICROS),
                 users.findById(m.getSenderId()).map(User::getDisplayName).orElse("Unavailable user"), hide || removed ? null : m.getFileId(), hide || removed ? null : m.getDurationMs(), hide || removed ? null : m.getAudioContentType(), hide || removed ? null : m.getAudioSizeBytes(), hide || removed ? null : voiceFiles.describe(m),
-                m.getReplyToId(), reply, m.getEditedAt(), m.getRemovedAt() == null ? m.getDeletedAt() : m.getRemovedAt(), m.getRevision(), hide, !hide && !removed && canDelete(viewer, m), delivery(m), m.getRecipientCount(), m.getDeliveredCount(), m.getSeenCount());
+                m.getReplyToId(), reply, m.getEditedAt(), m.getRemovedAt() == null ? m.getDeletedAt() : m.getRemovedAt(), m.getRevision(), hide, !hide && !removed && canDelete(viewer, m), delivery(m), m.getRecipientCount(), m.getDeliveredCount(), m.getSeenCount(), !hide && !removed && m.getForwardedFromId()!=null, hide || removed ? List.of() : reactions(viewer, m.getId()));
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Reaction> reactions(UUID viewer, UUID message) {
+        List<Object[]> rows = entityManager.createNativeQuery("select emoji,count(*),sum(case when user_id=:viewer then 1 else 0 end) from message_reactions where message_id=:message group by emoji order by emoji")
+                .setParameter("viewer", viewer).setParameter("message", message).getResultList();
+        return rows.stream().map(r -> new Reaction((String) r[0], ((Number) r[1]).longValue(), ((Number) r[2]).longValue()>0)).toList();
+    }
+
+    // Explicit desired state makes retries safe; the room lock also serializes deletion and membership changes.
+    @Transactional(isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+    public Message react(UUID viewer, UUID roomId, UUID id, React request) {
+        if (!Set.of("👍", "❤️", "😂", "😮", "😢", "🙏").contains(request.emoji())) throw bad("Unsupported reaction");
+        rooms.lockById(roomId).orElseThrow(() -> bad("Room unavailable"));
+        var room = requireRoom(viewer, roomId);
+        var message = visibleMessage(viewer, room, id);
+        if (message.getRemovedAt()!=null || isHidden(viewer,id)) throw bad("Message unavailable");
+        String sql = request.selected()
+                ? "insert ignore into message_reactions(message_id,user_id,emoji) values(:message,:viewer,:emoji)"
+                : "delete from message_reactions where message_id=:message and user_id=:viewer and emoji=:emoji";
+        int changed = entityManager.createNativeQuery(sql).setParameter("message",id).setParameter("viewer",viewer).setParameter("emoji",request.emoji()).executeUpdate();
+        if (changed>0) {
+            message.setRevision(message.getRevision()+1);
+            messages.flush();
+            publishMessage(id,"MESSAGE_UPDATED",null);
+        }
+        return messageDto(viewer,message);
+    }
+
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
+    public Sent forward(UUID sender, UUID destination, Forward request) {
+        for (int attempt=0; attempt<3; attempt++) {
+            try {
+                return writes.execute(status -> {
+                    // Match ordinary send lock order before locking both rooms in a stable order.
+                    var target = requireRoom(sender,destination);
+                    var userIds = new TreeSet<UUID>(Comparator.comparing(UUID::toString));
+                    userIds.add(sender);
+                    if (target.getType()==ChatRoomType.PERSONAL) userIds.add(partner(sender,destination));
+                    for (var userId:userIds) users.lockById(userId).orElseThrow();
+                    var roomIds = new TreeSet<UUID>(Comparator.comparing(UUID::toString));
+                    roomIds.add(destination); roomIds.add(request.sourceRoomId());
+                    for (var roomId:roomIds) rooms.lockById(roomId).orElseThrow(() -> bad("Room unavailable"));
+                    // Initial permission reads may predate a concurrent role/membership change.
+                    // Clearing managed snapshots does not release database locks.
+                    entityManager.clear();
+                    target = requireRoom(sender,destination);
+                    var prior = messages.previous(sender,request.clientMessageId());
+                    if (prior.isPresent()) {
+                        var m=prior.get();
+                        if (!destination.equals(m.getRoomId()) || !request.messageId().equals(m.getForwardedFromId())) throw conflict();
+                        visibleMessage(sender,target,m.getId());
+                        return new Sent(roomDto(sender,target),messageDto(sender,m));
+                    }
+                    ChatMessage source;
+                    try {
+                        var sourceRoom=requireRoom(sender,request.sourceRoomId());
+                        source=visibleMessage(sender,sourceRoom,request.messageId());
+                        if (source.getRemovedAt()!=null || isHidden(sender,source.getId())) throw bad("Message unavailable");
+                    } catch (ApiException ex) {
+                        // Clients must not treat loss of source access as removal from the destination.
+                        throw new ApiException(ex.getStatus(),"FORWARD_SOURCE_UNAVAILABLE","Original message is no longer available");
+                    }
+                    return persist(sender,null,destination,request.clientMessageId(),source.getContent(),source.getFileId(),source.getDurationMs(),source.getType(),null,source);
+                });
+            } catch (DataIntegrityViolationException | TransientDataAccessException ex) {
+                if (attempt==2) throw new ApiException(HttpStatus.CONFLICT,"SEND_CONFLICT","Concurrent change; retry with the same message identifier");
+            }
+        }
+        throw new IllegalStateException();
     }
 
     private void publishMessage(UUID id, String type, UUID onlyUser) {
@@ -433,7 +503,7 @@ public class ChatService {
         // Each retry starts a new transaction; never continue in a transaction marked rollback-only.
         for (int attempt = 0; attempt < 3; attempt++) {
             try {
-                return writes.execute(status -> persist(sender, recipient, requestedRoom, key, voice || attachment ? "" : content, fileId, durationMs, messageType, replyToId));
+                return writes.execute(status -> persist(sender, recipient, requestedRoom, key, voice || attachment ? "" : content, fileId, durationMs, messageType, replyToId, null));
             } catch (DataIntegrityViolationException | TransientDataAccessException ex) {
                 if (attempt == 2)
                     throw new ApiException(HttpStatus.CONFLICT, "SEND_CONFLICT", "Concurrent change; retry with the same message identifier");
@@ -450,7 +520,7 @@ public class ChatService {
         }
     }
 
-    private Sent persist(UUID sender, UUID recipient, UUID requestedRoom, UUID key, String content, UUID fileId, Long durationMs, MessageType messageType, UUID replyToId) {
+    private Sent persist(UUID sender, UUID recipient, UUID requestedRoom, UUID key, String content, UUID fileId, Long durationMs, MessageType messageType, UUID replyToId, ChatMessage source) {
         if (requestedRoom != null && rooms.findById(requestedRoom).map(r -> r.getType() != ChatRoomType.PERSONAL).orElse(false)) {
             users.lockById(sender).orElseThrow();
             var room = rooms.lockById(requestedRoom).orElseThrow();
@@ -465,7 +535,7 @@ public class ChatService {
                 if (room.getMessageHistoryVisibility() == MessageHistoryVisibility.VIEW_AFTER_JOIN &&
                         message.getCreatedAt().isBefore(senderMembership.getJoinedAt()))
                     throw new ApiException(HttpStatus.FORBIDDEN, "MESSAGE_HISTORY_HIDDEN", "Message is outside your visible history");
-                if (message.getDeletedAt() != null || message.getRemovedAt() != null || !Objects.equals(message.getReplyToId(), replyToId) || !message.getRoomId().equals(requestedRoom) || !message.getContent().equals(content) || !Objects.equals(message.getFileId(), fileId) || (message.getType() != messageType || (messageType == MessageType.VOICE && Math.abs(message.getDurationMs() - durationMs) > 1000)))
+                if (message.getForwardedFromId() != null || message.getDeletedAt() != null || message.getRemovedAt() != null || !Objects.equals(message.getReplyToId(), replyToId) || !message.getRoomId().equals(requestedRoom) || !message.getContent().equals(content) || !Objects.equals(message.getFileId(), fileId) || (message.getType() != messageType || (messageType == MessageType.VOICE && Math.abs(message.getDurationMs() - durationMs) > 1000)))
                     throw conflict();
                 return new Sent(roomDto(sender, room), messageDto(sender, message));
             }
@@ -474,7 +544,8 @@ public class ChatService {
             message.setSenderId(sender);
             message.setClientMessageId(key);
             message.setContent(content);
-            if (messageType == MessageType.VOICE) voiceFiles.attach(sender, message, fileId, durationMs);
+            if (source != null) forwardPayload(sender,message,source);
+            else if (messageType == MessageType.VOICE) voiceFiles.attach(sender, message, fileId, durationMs);
             else if (fileId != null) voiceFiles.attachFile(sender, message, fileId, messageType);
             reply(sender, room, message, replyToId);
             messages.saveAndFlush(message);
@@ -501,7 +572,7 @@ public class ChatService {
         var prior = messages.previous(sender, key);
         if (prior.isPresent()) {
             ChatMessage message = prior.get();
-            if (message.getDeletedAt() != null || message.getRemovedAt() != null || !Objects.equals(message.getReplyToId(), replyToId) || room == null || !message.getRoomId().equals(room.getId()) || !message.getContent().equals(content) || !Objects.equals(message.getFileId(), fileId) || (message.getType() != messageType || (messageType == MessageType.VOICE && Math.abs(message.getDurationMs() - durationMs) > 1000)))
+            if (message.getForwardedFromId() != null || message.getDeletedAt() != null || message.getRemovedAt() != null || !Objects.equals(message.getReplyToId(), replyToId) || room == null || !message.getRoomId().equals(room.getId()) || !message.getContent().equals(content) || !Objects.equals(message.getFileId(), fileId) || (message.getType() != messageType || (messageType == MessageType.VOICE && Math.abs(message.getDurationMs() - durationMs) > 1000)))
                 throw conflict();
             return new Sent(roomDto(sender, room), messageDto(sender, message));
         }
@@ -526,7 +597,8 @@ public class ChatService {
         message.setSenderId(sender);
         message.setClientMessageId(key);
         message.setContent(content);
-        if (messageType == MessageType.VOICE) voiceFiles.attach(sender, message, fileId, durationMs);
+        if (source != null) forwardPayload(sender,message,source);
+        else if (messageType == MessageType.VOICE) voiceFiles.attach(sender, message, fileId, durationMs);
         else if (fileId != null) voiceFiles.attachFile(sender, message, fileId, messageType);
         reply(sender, room, message, replyToId);
         messages.saveAndFlush(message);
@@ -535,5 +607,10 @@ public class ChatService {
         rooms.saveAndFlush(room);
         publishMessage(message.getId(), "MESSAGE_CREATED", null);
         return new Sent(roomDto(sender, room), messageDto(sender, message));
+    }
+    private void forwardPayload(UUID sender, ChatMessage message, ChatMessage source) {
+        message.setForwardedFromId(source.getId());
+        message.setType(source.getType());
+        if (source.getFileId()!=null) voiceFiles.forward(sender,message,source);
     }
 }

@@ -105,6 +105,129 @@ class ChatIntegrationTest {
     JsonNode send(Account a,Account b,String key,String content) throws Exception {
         return data(request(a,"POST","/api/v1/chat/personal/messages",first(b,key,content),200));
     }
+    @Test void interactionsReactionsAreConcurrentIdempotentAndRealtime() throws Exception {
+        var a=account(); var b=account(); var outsider=account();
+        var sent=send(a,b,key(),"React here");
+        String room=sent.get("room").get("id").asText(), id=sent.get("message").get("id").asText();
+        String path="/api/v1/chat/rooms/"+room+"/messages/"+id+"/reactions";
+        try(var wire=new Wire(b.token())) {
+            wire.subscribe(b);
+            var response=data(request(a,"PUT",path,Map.of("emoji","👍","selected",true),200));
+            assertThat(response.get("reactions").get(0).get("selected").asBoolean()).isTrue();
+            var event=wire.event();
+            assertThat(event.get("type").asText()).isEqualTo("MESSAGE_UPDATED");
+            assertThat(event.get("message").get("reactions").get(0).get("selected").asBoolean()).isFalse();
+        }
+        var pool=Executors.newFixedThreadPool(4);
+        try {
+            var start=new CountDownLatch(1);
+            List<Future<MvcResult>> work=new ArrayList<>();
+            for(int n=0;n<4;n++) work.add(pool.submit(() -> {start.await();return request(b,"PUT",path,Map.of("emoji","👍","selected",true),200);}));
+            start.countDown(); for(var f:work) f.get(20,TimeUnit.SECONDS);
+        } finally {pool.shutdownNow();}
+        var result=data(request(b,"PUT",path,Map.of("emoji","👍","selected",true),200));
+        assertThat(result.get("reactions").get(0).get("count").asInt()).isEqualTo(2);
+        assertThat(result.get("revision").asInt()).isEqualTo(2);
+        request(a,"PUT",path,Map.of("emoji","❤️","selected",true),200);
+        result=data(request(b,"PUT",path,Map.of("emoji","👍","selected",false),200));
+        assertThat(result.get("reactions").size()).isEqualTo(2);
+        request(outsider,"PUT",path,Map.of("emoji","👍","selected",true),403);
+        request(a,"PUT",path,Map.of("emoji","SQL","selected",true),400);
+        request(b,"DELETE","/api/v1/chat/rooms/"+room+"/messages/"+id,null,200);
+        request(b,"PUT",path,Map.of("emoji","👍","selected",true),400);
+        request(a,"DELETE","/api/v1/chat/rooms/"+room+"/messages/"+id+"?everyone=true",null,200);
+        request(a,"PUT",path,Map.of("emoji","👍","selected",true),400);
+        flyway.validate();
+        assertThat(jdbc.queryForObject("select count(*) from flyway_schema_history where version='17' and success=true",Integer.class)).isEqualTo(1);
+    }
+
+    @Test void interactionsForwardTextRetriesAndPermissions() throws Exception {
+        var a=account();var b=account();var c=account();var stranger=account();
+        var source=send(a,b,key(),"Forward me");
+        String sourceRoom=source.get("room").get("id").asText(), message=source.get("message").get("id").asText();
+        String destination=send(b,c,key(),"Destination").get("room").get("id").asText();
+        String path="/api/v1/chat/rooms/"+destination+"/forward";
+        var payload=Map.of("clientMessageId",key(),"sourceRoomId",sourceRoom,"messageId",message);
+        var first=data(request(b,"POST",path,payload,200)).get("message");
+        assertThat(first.get("content").asText()).isEqualTo("Forward me");
+        assertThat(first.get("forwarded").asBoolean()).isTrue();
+        assertThat(first.has("forwardedFromId")).isFalse();
+        var pool=Executors.newFixedThreadPool(2);
+        try {
+            var one=pool.submit(() -> data(request(b,"POST",path,payload,200)).get("message").get("id").asText());
+            var two=pool.submit(() -> data(request(b,"POST",path,payload,200)).get("message").get("id").asText());
+            assertThat(one.get(20,TimeUnit.SECONDS)).isEqualTo(first.get("id").asText());
+            assertThat(two.get(20,TimeUnit.SECONDS)).isEqualTo(first.get("id").asText());
+            var fresh=Map.of("clientMessageId",key(),"sourceRoomId",sourceRoom,"messageId",message);
+            var start=new CountDownLatch(1);
+            var freshOne=pool.submit(() -> {start.await();return data(request(b,"POST",path,fresh,200)).get("message").get("id").asText();});
+            var freshTwo=pool.submit(() -> {start.await();return data(request(b,"POST",path,fresh,200)).get("message").get("id").asText();});
+            start.countDown();
+            assertThat(freshOne.get(20,TimeUnit.SECONDS)).isEqualTo(freshTwo.get(20,TimeUnit.SECONDS));
+        } finally {pool.shutdownNow();}
+        request(stranger,"POST",path,payload,403);
+        request(c,"POST",path,Map.of("clientMessageId",key(),"sourceRoomId",sourceRoom,"messageId",message),403);
+        request(b,"DELETE","/api/v1/chat/rooms/"+sourceRoom+"/messages/"+message,null,200);
+        request(b,"POST",path,Map.of("clientMessageId",key(),"sourceRoomId",sourceRoom,"messageId",message),400);
+        request(b,"POST",path,payload,200);
+        request(b,"POST","/api/v1/chat/rooms/"+destination+"/messages",Map.of("clientMessageId",payload.get("clientMessageId"),"content","Forward me"),409);
+    }
+
+    @Test void interactionsGroupHistoryAndSendPermissions() throws Exception {
+        var a=account();var b=account();var c=account();
+        String source=managedGroup(a,b,"VIEW_AFTER_JOIN");
+        String destination=managedGroup(c,b,"VIEW_ALL_MESSAGES");
+        String id=data(request(a,"POST","/api/v1/chat/rooms/"+source+"/messages",Map.of("clientMessageId",key(),"content","Old group text"),200)).get("message").get("id").asText();
+        String reaction="/api/v1/chat/rooms/"+source+"/messages/"+id+"/reactions", forward="/api/v1/chat/rooms/"+destination+"/forward";
+        jdbc.update("update chat_messages set created_at='2026-01-01' where id=UUID_TO_BIN(?)",id);
+        request(b,"PUT",reaction,Map.of("emoji","👍","selected",true),404);
+        request(b,"POST",forward,Map.of("clientMessageId",key(),"sourceRoomId",source,"messageId",id),404);
+        jdbc.update("update chat_rooms set message_history_visibility='VIEW_ALL_MESSAGES' where id=UUID_TO_BIN(?)",source);
+        request(b,"PUT",reaction,Map.of("emoji","👍","selected",true),200);
+        jdbc.update("update chat_rooms set members_can_send=false where id=UUID_TO_BIN(?)",destination);
+        request(b,"POST",forward,Map.of("clientMessageId",key(),"sourceRoomId",source,"messageId",id),403);
+        jdbc.update("update chat_rooms set members_can_send=true where id=UUID_TO_BIN(?)",destination);
+        request(b,"POST",forward,Map.of("clientMessageId",key(),"sourceRoomId",source,"messageId",id),200);
+        jdbc.update("update chat_room_members set deleted_at=UTC_TIMESTAMP(6) where room_id=UUID_TO_BIN(?) and user_id=UUID_TO_BIN(?)",source,b.id());
+        request(b,"PUT",reaction,Map.of("emoji","👍","selected",false),403);
+        var denied=data(request(b,"POST",forward,Map.of("clientMessageId",key(),"sourceRoomId",source,"messageId",id),403));
+        assertThat(denied.get("code").asText()).isEqualTo("FORWARD_SOURCE_UNAVAILABLE");
+    }
+
+    @Test void interactionsForwardMediaSharesBlobWithIndependentAccessAndCleanup() throws Exception {
+        var a=account();var b=account();var c=account();var outsider=account();
+        String source=send(a,b,key(),"Source").get("room").get("id").asText();
+        String destination=managedGroup(b,c,"VIEW_AFTER_JOIN");
+        for(String type:List.of("IMAGE","VOICE","FILE")) {
+            String file;
+            if(type.equals("VOICE")) file=uploadVoice(a);
+            else if(type.equals("IMAGE")) file=uploadGroupImage(a);
+            else {
+                var upload=new org.springframework.mock.web.MockMultipartFile("file","report.txt","text/plain","Report".getBytes());
+                file=data(mvc.perform(multipart("/api/v1/storage/files").file(upload).header("Authorization","Bearer "+a.token())).andExpect(status().isCreated()).andReturn()).get("id").asText();
+            }
+            var send=new HashMap<String,Object>();send.put("clientMessageId",key());send.put("type",type);send.put("fileId",file);
+            if(type.equals("VOICE"))send.put("durationMs",1000);
+            String id=data(request(a,"POST","/api/v1/chat/rooms/"+source+"/messages",send,200)).get("message").get("id").asText();
+            var forwarded=data(request(b,"POST","/api/v1/chat/rooms/"+destination+"/forward",Map.of("clientMessageId",key(),"sourceRoomId",source,"messageId",id),200)).get("message");
+            assertThat(forwarded.get("fileId").asText()).isEqualTo(file);
+            assertThat(forwarded.get("type").asText()).isEqualTo(type);
+            String download="/api/v1/storage/files/"+file+"/download";
+            request(c,"GET",download,null,200);request(outsider,"GET",download,null,404);
+            jdbc.update("update chat_room_members set joined_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 1 MINUTE) where room_id=UUID_TO_BIN(?) and user_id=UUID_TO_BIN(?)",destination,c.id());
+            request(c,"GET",download,null,404);
+            jdbc.update("update chat_room_members set joined_at='2026-01-01' where room_id=UUID_TO_BIN(?) and user_id=UUID_TO_BIN(?)",destination,c.id());
+            request(a,"DELETE","/api/v1/chat/rooms/"+source+"/messages/"+id+"?everyone=true",null,200);
+            request(b,"POST","/api/v1/chat/rooms/"+destination+"/forward",Map.of("clientMessageId",key(),"sourceRoomId",source,"messageId",id),400);
+            voiceCleanup.run();
+            request(c,"GET",download,null,200);request(a,"GET",download,null,404);
+            request(c,"DELETE","/api/v1/chat/rooms/"+destination+"/messages/"+forwarded.get("id").asText(),null,200);
+            request(c,"GET",download,null,404);request(b,"GET",download,null,200);
+            request(b,"DELETE","/api/v1/chat/rooms/"+destination+"/messages/"+forwarded.get("id").asText()+"?everyone=true",null,200);
+            voiceCleanup.run();request(b,"GET",download,null,404);
+        }
+    }
+
     @Test void searchPersonalRoomsMessagesAndPrivateFields() throws Exception {
         var a=account(); var b=account(); var outsider=account();
         jdbc.update("update users set display_name='Search Friend',username='search_friend' where id=UUID_TO_BIN(?)", b.id());
