@@ -181,20 +181,18 @@ public class VoiceFiles {
 
         }
 
-        var message=attached.get();
+        if (messages.readableFileReferences(file.getId(),actor)==0) throw StorageErrors.missing();
+    }
 
-        if(message.getDeletedAt()!=null || message.getRemovedAt()!=null || messages.hiddenCount(message.getId(),actor)>0) throw StorageErrors.missing();
-
-        var room=rooms.findById(message.getRoomId()).orElseThrow(StorageErrors::missing);
-
-        var member=members.findByRoomId(room.getId()).stream().filter(m -> actor.equals(m.getUserId()))
-
-            .findFirst().orElseThrow(StorageErrors::missing);
-
-        if(room.getType()!=ChatRoomType.PERSONAL && room.getMessageHistoryVisibility()==MessageHistoryVisibility.VIEW_AFTER_JOIN
-
-           && message.getCreatedAt().isBefore(member.getJoinedAt())) throw StorageErrors.missing();
-
+    /** A forward grants access through its own message; ownership of the stored blob is unchanged. */
+    public void forward(UUID actor, ChatMessage target, ChatMessage source) {
+        var file=files.lockIncludingDeleted(source.getFileId()).orElseThrow(StorageErrors::missing);
+        if (file.getDeletedAt()!=null || file.getStatus()!=StoredFileStatus.AVAILABLE) throw StorageErrors.missing();
+        requireRead(actor,file);
+        target.setFileId(file.getId());
+        target.setDurationMs(source.getDurationMs());
+        target.setAudioContentType(source.getAudioContentType());
+        target.setAudioSizeBytes(source.getAudioSizeBytes());
     }
 
     public void requireUnattached(UUID id) {

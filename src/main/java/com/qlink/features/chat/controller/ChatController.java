@@ -16,6 +16,15 @@ import java.util.UUID;
 public class ChatController {
  private final ChatService service;
 
+ @PutMapping("/rooms/{roomId}/messages/{id}/reactions")
+ public ApiResponse<Message> react(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID roomId,@PathVariable UUID id,@Valid @RequestBody React request) {
+  return ApiResponse.ok("Reaction updated",service.react(viewer(jwt),roomId,id,request));
+ }
+ @PostMapping("/rooms/{roomId}/forward")
+ public ApiResponse<Sent> forward(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID roomId,@Valid @RequestBody Forward request) {
+  return ApiResponse.ok("Message forwarded",service.forward(viewer(jwt),roomId,request));
+ }
+
  @PostMapping("/groups")
  public ApiResponse<Room> createGroup(@AuthenticationPrincipal Jwt jwt,@RequestBody CreateGroup request) {
   return ApiResponse.ok("Group created",service.createGroup(viewer(jwt),request));

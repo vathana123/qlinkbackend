@@ -25,7 +25,7 @@ public class VoiceCleanup {
             tx.executeWithoutResult(status -> {
                 var file=files.lockIncludingDeleted(id).orElseThrow();
                 var attached=messages.includingDeletedByFileId(id);
-                if(file.getDeletedAt()==null && (attached.isPresent() ? (attached.get().getDeletedAt()!=null || attached.get().getRemovedAt()!=null) : file.getCreatedAt().isBefore(before)))
+                if(file.getDeletedAt()==null && (attached.isPresent() ? messages.liveFileReferences(id)==0 : file.getCreatedAt().isBefore(before)))
                     file.markDeleted(file.getUploadedBy());
             });
             if(cleanup.cleanupDeleted(id)) tx.executeWithoutResult(status -> {
