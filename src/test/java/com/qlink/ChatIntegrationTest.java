@@ -105,6 +105,121 @@ class ChatIntegrationTest {
     JsonNode send(Account a,Account b,String key,String content) throws Exception {
         return data(request(a,"POST","/api/v1/chat/personal/messages",first(b,key,content),200));
     }
+    @Test void chatManagementPinLimitIsolationArchiveMuteAndOrdering() throws Exception {
+        var a=account(); var b=account(); var outsider=account();
+        var room=send(a,b,key(),"first").get("room").get("id").asText();
+        var path="/api/v1/chat/rooms/"+room;
+        try(var wire=new Wire(a.token())) {
+            wire.subscribe(a);
+            var settings=data(request(a,"PUT",path+"/settings",Map.of("pinned",true,"archived",true),200));
+            assertThat(settings.get("pinned").asBoolean()).isTrue();
+            assertThat(wire.event().get("type").asText()).isEqualTo("ROOM_SETTINGS_UPDATED");
+        }
+        request(a,"PUT",path+"/notifications",Map.of("muted",true),200);
+        send(b,a,key(),"still archived");
+        var own=data(request(a,"GET",path,null,200));
+        assertThat(own.get("archived").asBoolean()).isTrue();
+        assertThat(own.get("muted").asBoolean()).isTrue();
+        assertThat(own.get("unreadCount").asInt()).isEqualTo(1);
+        var peer=data(request(b,"GET",path,null,200));
+        assertThat(peer.get("pinned").asBoolean()).isFalse();
+        assertThat(peer.get("archived").asBoolean()).isFalse();
+        assertThat(peer.get("muted").asBoolean()).isFalse();
+        assertThat(data(request(a,"GET","/api/v1/chat/rooms?archived=false",null,200)).get("content").size()).isZero();
+        assertThat(data(request(a,"GET","/api/v1/chat/rooms?archived=true",null,200)).get("content").size()).isEqualTo(1);
+        request(outsider,"PUT",path+"/settings",Map.of("pinned",true),403);
+        for(int i=0;i<4;i++) {
+            String id=send(a,account(),key(),"pin "+i).get("room").get("id").asText();
+            request(a,"PUT","/api/v1/chat/rooms/"+id+"/settings",Map.of("pinned",true),200);
+        }
+        String sixth=send(a,account(),key(),"newest unpinned").get("room").get("id").asText();
+        request(a,"PUT","/api/v1/chat/rooms/"+sixth+"/settings",Map.of("pinned",true),409);
+        request(a,"PUT",path+"/settings",Map.of("pinned",true),200); // Idempotent at limit.
+        var listed=data(request(a,"GET","/api/v1/chat/rooms",null,200)).get("content");
+        for(int i=0;i<5;i++) assertThat(listed.get(i).get("pinned").asBoolean()).isTrue();
+        assertThat(listed.get(5).get("id").asText()).isEqualTo(sixth);
+        request(a,"PUT",path+"/settings",Map.of("pinned",false,"archived",false),200);
+        request(a,"PUT",path+"/notifications",Map.of("muted",false),200);
+        request(a,"PUT","/api/v1/chat/rooms/"+sixth+"/settings",Map.of("pinned",true),200);
+    }
+
+    @Test void sharedMediaPaginationVisibilityForwardReferencesAndBlocking() throws Exception {
+        var a=account(); var b=account(); var stranger=account();
+        String room=send(a,b,key(),"media").get("room").get("id").asText();
+        String path="/api/v1/chat/rooms/"+room, file=uploadGroupImage(a);
+        var original=data(request(a,"POST",path+"/messages",Map.of("clientMessageId",key(),"type","IMAGE","fileId",file),200)).get("message");
+        var forwarded=data(request(a,"POST",path+"/forward",Map.of("clientMessageId",key(),"sourceRoomId",room,"messageId",original.get("id").asText()),200)).get("message");
+        var firstPage=data(request(b,"GET",path+"/media?category=PHOTOS&size=1",null,200));
+        assertThat(firstPage.get("items").size()).isEqualTo(1);
+        assertThat(firstPage.get("items").get(0).get("id").asText()).isEqualTo(forwarded.get("id").asText());
+        String cursor=firstPage.get("nextCursor").asText();
+        var secondPage=data(request(b,"GET",path+"/media?category=PHOTOS&size=1&cursor="+cursor,null,200));
+        assertThat(secondPage.get("items").get(0).get("id").asText()).isEqualTo(original.get("id").asText());
+        assertThat(secondPage.get("nextCursor").isNull()).isTrue();
+        request(b,"GET",path+"/media?category=VOICE&cursor="+cursor,null,400);
+        request(b,"GET",path+"/media?category=INVALID",null,400);
+        request(b,"GET",path+"/media?category=PHOTOS&size=51",null,400);
+        request(stranger,"GET",path+"/media?category=PHOTOS",null,403);
+        request(b,"DELETE",path+"/messages/"+original.get("id").asText(),null,200);
+        assertThat(data(request(b,"GET",path+"/media?category=PHOTOS",null,200)).get("items").size()).isEqualTo(1);
+        assertThat(data(request(a,"GET",path+"/media?category=PHOTOS",null,200)).get("items").size()).isEqualTo(2);
+        request(a,"DELETE",path+"/messages/"+original.get("id").asText()+"?everyone=true",null,200);
+        request(b,"GET","/api/v1/storage/files/"+file+"/download",null,200);
+        request(b,"PUT","/api/v1/users/me/blocks/"+a.id(),null,200);
+        // Phase 4.6 blocking preserves history, including its media.
+        assertThat(data(request(b,"GET",path+"/media?category=PHOTOS",null,200)).get("items").size()).isEqualTo(1);
+        request(b,"DELETE",path+"/messages/"+forwarded.get("id").asText(),null,200);
+        assertThat(data(request(b,"GET",path+"/media?category=PHOTOS",null,200)).get("items").isEmpty()).isTrue();
+        request(b,"GET","/api/v1/storage/files/"+file+"/download",null,404);
+        request(a,"GET","/api/v1/storage/files/"+file+"/download",null,200);
+    }
+
+    @Test void sharedMediaCategoriesAndGroupHistoryMembership() throws Exception {
+        var owner=account(); var member=account();
+        for(String policy:List.of("VIEW_AFTER_JOIN","VIEW_ALL_MESSAGES")) {
+            String room=managedGroup(owner,member,policy), path="/api/v1/chat/rooms/"+room;
+            String voice=uploadVoice(owner);
+            request(owner,"POST",path+"/messages",Map.of("clientMessageId",key(),"type","VOICE","fileId",voice,"durationMs",1000),200);
+            var upload=new org.springframework.mock.web.MockMultipartFile("file","report.txt","text/plain","A report".getBytes());
+            String file=data(mvc.perform(multipart("/api/v1/storage/files").file(upload).header("Authorization","Bearer "+owner.token()))
+                .andExpect(status().isCreated()).andReturn()).get("id").asText();
+            request(owner,"POST",path+"/messages",Map.of("clientMessageId",key(),"type","FILE","fileId",file),200);
+            assertThat(data(request(member,"GET",path+"/media?category=PHOTOS",null,200)).get("items").size()).isZero();
+            assertThat(data(request(member,"GET",path+"/media?category=VOICE",null,200)).get("items").size()).isEqualTo(1);
+            assertThat(data(request(member,"GET",path+"/media?category=FILES",null,200)).get("items").size()).isEqualTo(1);
+            request(member,"PUT",path+"/settings",Map.of("archived",true,"pinned",true),200);
+            assertThat(data(request(owner,"GET",path,null,200)).get("archived").asBoolean()).isFalse();
+            jdbc.update("update chat_room_members set joined_at=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 1 MINUTE) where room_id=UUID_TO_BIN(?) and user_id=UUID_TO_BIN(?)",room,member.id());
+            assertThat(data(request(member,"GET",path+"/media?category=VOICE",null,200)).get("items").size()).isEqualTo(policy.equals("VIEW_AFTER_JOIN")?0:1);
+            request(owner,"DELETE","/api/v1/chat/groups/"+room+"/members/"+member.id(),null,200);
+            request(member,"GET",path+"/media?category=FILES",null,403);
+            request(member,"PUT",path+"/settings",Map.of("archived",false),403);
+            request(member,"GET","/api/v1/storage/files/"+file+"/download",null,404);
+            request(owner,"POST","/api/v1/chat/groups/"+room+"/members",Map.of("memberIds",List.of(member.id())),200);
+            assertThat(data(request(member,"GET",path,null,200)).get("archived").asBoolean()).isTrue();
+            request(member,"PUT",path+"/settings",Map.of("archived",false),200);
+            assertThat(data(request(member,"GET",path,null,200)).get("archived").asBoolean()).isFalse();
+        }
+    }
+
+    @Test void chatManagementConcurrentPinsRespectBudget() throws Exception {
+        var a=account(); var ids=new ArrayList<String>();
+        for(int i=0;i<6;i++) ids.add(send(a,account(),key(),"pin race").get("room").get("id").asText());
+        var pool=Executors.newFixedThreadPool(6);
+        try {
+            var start=new CountDownLatch(1); var work=new ArrayList<Future<Integer>>();
+            for(var id:ids) work.add(pool.submit(() -> {
+                start.await();
+                return mvc.perform(put("/api/v1/chat/rooms/"+id+"/settings").header("Authorization","Bearer "+a.token())
+                    .contentType("application/json").content(body(Map.of("pinned",true)))).andReturn().getResponse().getStatus();
+            }));
+            start.countDown(); var results=new ArrayList<Integer>();
+            for(var f:work) results.add(f.get(30,TimeUnit.SECONDS));
+            assertThat(results).containsOnly(200,409);
+            assertThat(results.stream().filter(s -> s==200).count()).isEqualTo(5);
+        } finally {pool.shutdownNow();}
+    }
+
     @Test void interactionsReactionsAreConcurrentIdempotentAndRealtime() throws Exception {
         var a=account(); var b=account(); var outsider=account();
         var sent=send(a,b,key(),"React here");
@@ -697,7 +812,44 @@ class ChatIntegrationTest {
         }
 
         void quiet() throws Exception {assertThat(frames.poll(250,TimeUnit.MILLISECONDS)).isNull();}
+        void activity() throws Exception {
+            assertThat(next()).startsWith("CONNECTED");
+            send("SUBSCRIBE\nid:activity\ndestination:/user/queue/activity\nack:auto\nreceipt:activity-ready\n\n");
+            assertThat(next()).startsWith("RECEIPT");
+        }
+        void activity(String action, Object payload) { send("SEND\ndestination:/app/activity/"+action+"\ncontent-type:application/json\n\n"+body(payload)); }
         @Override public void close() {socket.abort();}
+    }
+
+    @Test void presenceMultipleDevicesReconnectAndAuthorizedTyping() throws Exception {
+        String subject=key(); var signedUp=signup(subject);
+        var a=new Account(signedUp.at("/user/id").asText(),signedUp.get("accessToken").asText());
+        var secondLogin=data(postJson("signin",provider(subject),200));
+        var b=account(); var outsider=account();
+        String room=send(a,b,key(),"contact").at("/room/id").asText();
+        try(var watcher=new Wire(b.token()); var first=new Wire(a.token()); var second=new Wire(secondLogin.get("accessToken").asText()); var other=new Wire(outsider.token())) {
+            watcher.activity(); first.activity(); second.activity(); other.activity();
+            watcher.activity("watch",Map.of("userIds",List.of(a.id())));
+            assertThat(watcher.event().get("online").asBoolean()).isTrue();
+            assertThat(watcher.event().get("type").asText()).isEqualTo("PERMISSIONS");
+            assertThat(data(request(b,"GET","/api/v1/users/"+a.id()+"/presence",null,200)).get("online").asBoolean()).isTrue();
+            assertThat(data(request(outsider,"GET","/api/v1/users/"+a.id()+"/presence",null,200)).get("online").isNull()).isTrue();
+            first.close(); Thread.sleep(250); watcher.quiet();
+            second.activity("typing",Map.of("roomId",room,"typing",true));
+            var typing=watcher.event(); assertThat(typing.get("typing").asBoolean()).isTrue();
+            assertThat(typing.get("roomId").asText()).isEqualTo(room); other.quiet();
+            other.activity("typing",Map.of("roomId",room,"typing",true)); watcher.quiet();
+            Thread.sleep(250); second.activity("typing",Map.of("roomId",room,"typing",false));
+            assertThat(watcher.event().get("typing").asBoolean()).isFalse();
+            second.close();
+            var offline=watcher.event(); assertThat(offline.get("online").asBoolean()).isFalse();
+            assertThat(offline.get("lastSeenAt").isTextual()).isTrue();
+            try(var reconnect=new Wire(a.token())) {
+                reconnect.activity(); assertThat(watcher.event().get("online").asBoolean()).isTrue();
+            }
+        }
+        mvc.perform(get("/api/v1/users/"+a.id()+"/presence")).andExpect(status().isUnauthorized());
+        assertThat(flyway.info().current().getVersion().toString()).isEqualTo("20");
     }
 
     String uploadVoice(Account owner) throws Exception {
@@ -814,6 +966,8 @@ class ChatIntegrationTest {
             "SUBSCRIBE\nid:x\ndestination:/queue/chat-events\n\n",
             "SUBSCRIBE\nid:x\ndestination:/user/another/queue/chat-events\n\n",
             "SUBSCRIBE\nid:x\ndestination:/topic/chat/room\n\n",
+            "SUBSCRIBE\nid:x\ndestination:/user/another/queue/activity\n\n",
+            "SUBSCRIBE\nid:x\ndestination:/topic/presence\n\n",
             "SEND\ndestination:/queue/chat-events\n\nforged",
             "SEND\ndestination:/app/messages\n\nforged")) {
             try(var wire=new Wire(a.token())) {assertThat(wire.next()).startsWith("CONNECTED");wire.send(frame);assertThat(wire.next()).startsWith("ERROR");}
@@ -1255,5 +1409,110 @@ class ChatIntegrationTest {
         request(owner,"DELETE","/api/v1/chat/groups/"+room+"/members/"+member.id(),null,200);
         for(String id:jdbc.queryForList("select BIN_TO_UUID(id) from push_deliveries where message_id=UUID_TO_BIN(?)",String.class,message)) push.dispatch(UUID.fromString(id));
         verify(pushGateway,never()).send(any(),any(),eq(UUID.fromString(message)),any(),any());
+    }
+
+    @Test void privacySettingsRedactRestAndRealtimeForExistingWatchers() throws Exception {
+        var a=account(); var b=account(); var outsider=account(); send(a,b,key(),"contact");
+        assertThat(data(request(a,"GET","/api/v1/users/me/privacy",null,200)).get("onlineVisibility").asText()).isEqualTo("CONTACTS");
+        request(a,"PUT","/api/v1/users/me/privacy",Map.of("onlineVisibility","UNKNOWN","lastSeenVisibility","NOBODY"),400);
+        request(a,"PUT","/api/v1/users/me/privacy",Map.of("onlineVisibility","EVERYONE","lastSeenVisibility","EVERYONE"),200);
+        try(var active=new Wire(a.token()); var viewer=new Wire(outsider.token())) {
+            active.activity(); viewer.activity();
+            viewer.activity("watch",Map.of("userIds",List.of(a.id())));
+            assertThat(viewer.event().get("online").asBoolean()).isTrue(); viewer.event();
+            request(a,"PUT","/api/v1/users/me/privacy",Map.of("onlineVisibility","CONTACTS","lastSeenVisibility","CONTACTS"),200);
+            var hidden=viewer.event(); assertThat(hidden.get("online").isNull()).isTrue(); assertThat(hidden.get("lastSeenAt").isNull()).isTrue();
+            assertThat(data(request(b,"GET","/api/v1/users/"+a.id()+"/presence",null,200)).get("online").asBoolean()).isTrue();
+            request(a,"PUT","/api/v1/users/me/privacy",Map.of("onlineVisibility","NOBODY","lastSeenVisibility","NOBODY"),200);
+            viewer.event();
+            assertThat(data(request(b,"GET","/api/v1/users/"+a.id()+"/presence",null,200)).get("online").isNull()).isTrue();
+        }
+        mvc.perform(put("/api/v1/users/me/privacy").contentType("application/json").content(body(Map.of("onlineVisibility","EVERYONE","lastSeenVisibility","EVERYONE")))).andExpect(status().isUnauthorized());
+    }
+
+    @Test void blockingStopsBothPersonalDirectionsPreservesHistoryGroupsAndForwardRetry() throws Exception {
+        var a=account(); var b=account(); var other=account();
+        String originalKey=key(); var original=send(a,b,originalKey,"preserved history");
+        String room=original.at("/room/id").asText(), message=original.at("/message/id").asText();
+        String group=managedGroup(a,b);
+        int historySize=data(request(a,"GET","/api/v1/chat/rooms/"+room+"/messages",null,200)).get("items").size();
+        String destination=send(a,other,key(),"destination").at("/room/id").asText();
+        String forwardKey=key(); var forward=Map.of("clientMessageId",forwardKey,"sourceRoomId",room,"messageId",message);
+        var forwarded=data(request(a,"POST","/api/v1/chat/rooms/"+destination+"/forward",forward,200));
+        request(a,"PUT","/api/v1/users/me/blocks/"+b.id(),null,200);
+        request(a,"PUT","/api/v1/users/me/blocks/"+b.id(),null,200);
+        assertThat(data(request(a,"GET","/api/v1/users/me/blocks",null,200)).get("content").size()).isEqualTo(1);
+        assertThat(data(request(b,"GET","/api/v1/users/"+a.id()+"/relationship",null,200)).get("blockedByMe").asBoolean()).isFalse();
+        for(var pair:List.of(List.of(a,b),List.of(b,a))) {
+            var actor=pair.get(0); var peer=pair.get(1);
+            request(actor,"POST","/api/v1/chat/personal/messages",Map.of("recipientId",peer.id(),"clientMessageId",key(),"content","denied"),403);
+            request(actor,"POST","/api/v1/chat/rooms/"+room+"/messages",Map.of("clientMessageId",key(),"content","denied"),403);
+            assertThat(data(request(actor,"GET","/api/v1/chat/rooms/"+room,null,200)).get("canSend").asBoolean()).isFalse();
+            assertThat(data(request(actor,"GET","/api/v1/chat/rooms/"+room+"/messages",null,200)).get("items").size()).isEqualTo(historySize);
+            assertThat(data(request(actor,"GET","/api/v1/users/"+peer.id()+"/presence",null,200)).get("online").isNull()).isTrue();
+            request(actor,"GET","/api/v1/users/"+peer.id()+"/public",null,404);
+            request(actor,"POST","/api/v1/chat/rooms/"+group+"/messages",Map.of("clientMessageId",key(),"content","group allowed"),200);
+        }
+        assertThat(send(a,b,originalKey,"preserved history").at("/message/id").asText()).isEqualTo(message);
+        assertThat(data(request(a,"POST","/api/v1/chat/rooms/"+destination+"/forward",forward,200)).at("/message/id")).isEqualTo(forwarded.at("/message/id"));
+        request(a,"POST","/api/v1/chat/rooms/"+room+"/forward",Map.of("clientMessageId",key(),"sourceRoomId",destination,"messageId",forwarded.at("/message/id").asText()),403);
+        request(a,"PUT","/api/v1/chat/rooms/"+room+"/messages/"+message+"/reactions",Map.of("emoji","👍","selected",true),403);
+        request(a,"DELETE","/api/v1/users/me/blocks/"+b.id(),null,200);
+        send(b,a,key(),"after unblock");
+        request(a,"PUT","/api/v1/users/me/blocks/"+a.id(),null,400);
+    }
+
+    @Test void blockingDiscoveryAndConcurrentDesiredStateArePrivate() throws Exception {
+        var a=account(); var b=account(); send(a,b,key(),"contact");
+        String username="privacy_"+key().replace("-","").substring(0,10);
+        request(b,"PATCH","/api/v1/users/me/username",Map.of("username",username),200);
+        assertThat(data(request(a,"GET","/api/v1/users/search?q="+username,null,200)).get("content").size()).isEqualTo(1);
+        var pool=Executors.newFixedThreadPool(3);
+        try {
+            var tasks=new ArrayList<Future<?>>();
+            for(int i=0;i<3;i++) tasks.add(pool.submit(() -> { try { request(a,"PUT","/api/v1/users/me/blocks/"+b.id(),null,200); } catch(Exception ex) { throw new RuntimeException(ex); } }));
+            for(var task:tasks) task.get(20,TimeUnit.SECONDS);
+        } finally { pool.shutdownNow(); }
+        assertThat(data(request(a,"GET","/api/v1/users/search?q="+username,null,200)).get("content").size()).isZero();
+        assertThat(data(request(a,"GET","/api/v1/users/me/blocks",null,200)).get("content").size()).isEqualTo(1);
+        request(b,"PUT","/api/v1/users/me/blocks/"+a.id(),null,200);
+        request(a,"DELETE","/api/v1/users/me/blocks/"+b.id(),null,200);
+        assertThat(data(request(a,"GET","/api/v1/users/"+b.id()+"/relationship",null,200)).get("canMessage").asBoolean()).isFalse();
+        request(b,"DELETE","/api/v1/users/me/blocks/"+a.id(),null,200);
+        assertThat(data(request(a,"GET","/api/v1/users/search?q="+username,null,200)).get("content").size()).isEqualTo(1);
+    }
+
+    @Test void blockRevokesTypingAndUpdatesEveryDeviceWithoutDisclosingActor() throws Exception {
+        var a=account(); var b=account(); String room=send(a,b,key(),"contact").at("/room/id").asText();
+        try(var wa=new Wire(a.token());var wb=new Wire(b.token());var second=new Wire(b.token())) {
+            wa.activity(); wb.activity(); second.activity();
+            wa.activity("typing",Map.of("roomId",room,"typing",true,"userId",b.id()));
+            assertThat(wb.event().get("userId").asText()).isEqualTo(a.id()); second.event();
+            request(b,"PUT","/api/v1/users/me/blocks/"+a.id(),null,200);
+            for(var wire:List.of(wa,wb,second)) {
+                var event=wire.event(); assertThat(event.get("type").asText()).isEqualTo("PERMISSIONS");
+                assertThat(event.get("canMessage").asBoolean()).isFalse(); assertThat(event.has("blockedByMe")).isFalse();
+            }
+            Thread.sleep(250); wa.activity("typing",Map.of("roomId",room,"typing",true)); wb.quiet(); second.quiet();
+            request(b,"DELETE","/api/v1/users/me/blocks/"+a.id(),null,200);
+            for(var wire:List.of(wa,wb,second)) assertThat(wire.event().get("canMessage").asBoolean()).isTrue();
+        }
+    }
+
+    @Test void typingExpiresWithoutStopAndBlockPreventsFirstRoomCreation() throws Exception {
+        var a=account(); var b=account(); var stranger=account();
+        request(a,"PUT","/api/v1/users/me/blocks/"+stranger.id(),null,200);
+        request(stranger,"POST","/api/v1/chat/personal/messages",Map.of("recipientId",a.id(),"clientMessageId",key(),"content","denied first message"),403);
+        assertThat(data(request(stranger,"GET","/api/v1/chat/personal/with/"+a.id(),null,200)).get("exists").asBoolean()).isFalse();
+        String room=send(a,b,key(),"contact").at("/room/id").asText();
+        try(var wa=new Wire(a.token());var wb=new Wire(b.token())) {
+            wa.activity(); wb.activity();
+            wa.activity("typing",Map.of("roomId",room,"typing",true)); assertThat(wb.event().get("typing").asBoolean()).isTrue();
+            String expired=wb.frames.poll(12,TimeUnit.SECONDS); assertThat(expired).isNotNull();
+            assertThat(json.readTree(expired.substring(expired.indexOf("\n\n")+2)).get("typing").asBoolean()).isFalse();
+        }
+        jdbc.update("update users set deleted_at=UTC_TIMESTAMP(6) where id=UUID_TO_BIN(?)",stranger.id());
+        request(a,"DELETE","/api/v1/users/me/blocks/"+stranger.id(),null,200);
+        assertThat(data(request(a,"GET","/api/v1/users/me/blocks",null,200)).get("content").size()).isZero();
     }
 }

@@ -17,6 +17,7 @@ import java.util.*;
 public class DiscoveryService {
     private final UserRepository users; private final UserService current; private final UserMapper mapper;
     private final SearchRateLimiter searchLimits;
+    private final PrivacyPolicy privacy;
 
     public static String normalize(String name) {
         if (name == null) throw invalid("Username is required");
@@ -32,7 +33,11 @@ public class DiscoveryService {
         return users.findById(id).filter(u -> u.getStatus() == UserStatus.ACTIVE)
             .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "USER_NOT_FOUND", "User is unavailable"));
     }
-    public PublicUserResponse resolve(UUID viewer, UUID id) { return mapper.toPublic(recipient(viewer,id)); }
+    public PublicUserResponse resolve(UUID viewer, UUID id) {
+        var user=recipient(viewer,id);
+        if (!privacy.canMessage(viewer,id)) throw new ApiException(HttpStatus.NOT_FOUND,"USER_NOT_FOUND","User is unavailable");
+        return mapper.toPublic(user);
+    }
     public Page<PublicUserResponse> search(UUID viewer, String query, int page, int size) {
         current.requireActive(viewer);
         searchLimits.acquire(viewer);

@@ -78,6 +78,8 @@ public class GroupService {
         for(UUID user:ids) {
             users.requireActive(user);
             var membership=new ChatRoomMember(); membership.setRoomId(id); membership.setUserId(user);
+            // A new history period must not silently unarchive the user's conversation.
+            membership.setArchived(members.latestMembership(id,user).map(ChatRoomMember::isArchived).orElse(false));
             membership.setRole(ChatRoomMemberRole.MEMBER);
             // Rejoining creates a new period; never reactivate the old membership.
             membership.setJoinedAt(Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS));

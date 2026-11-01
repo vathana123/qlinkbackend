@@ -56,6 +56,10 @@ public class ChatController {
   return ApiResponse.ok("Message deleted",service.delete(viewer(jwt),roomId,id,everyone));
  }
  private UUID viewer(Jwt jwt) { return UUID.fromString(jwt.getSubject()); }
+ @PutMapping("/rooms/{roomId}/settings")
+ public ApiResponse<Room> settings(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID roomId,@RequestBody RoomSettings request) {
+  return ApiResponse.ok("Conversation updated",service.settings(viewer(jwt),roomId,request));
+ }
  @GetMapping("/personal/with/{userId}") @Operation(summary="Find a personal room without creating it")
  public ApiResponse<Lookup> lookup(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID userId) {
   return ApiResponse.ok("Conversation",service.lookup(viewer(jwt),userId));
@@ -65,8 +69,8 @@ public class ChatController {
   return ApiResponse.ok("Message sent",service.sendPersonal(viewer(jwt),request));
  }
  @GetMapping("/rooms") @Operation(summary="List your active rooms")
- public ApiResponse<Page<Room>> rooms(@AuthenticationPrincipal Jwt jwt,@RequestParam(defaultValue="0") int page,@RequestParam(defaultValue="20") int size) {
-  return ApiResponse.ok("Rooms",service.list(viewer(jwt),page,size));
+ public ApiResponse<Page<Room>> rooms(@AuthenticationPrincipal Jwt jwt,@RequestParam(defaultValue="0") int page,@RequestParam(defaultValue="20") int size,@RequestParam(required=false) Boolean archived) {
+  return ApiResponse.ok("Rooms",service.list(viewer(jwt),page,size,archived));
  }
  @GetMapping("/rooms/{roomId}/messages") @Operation(summary="Read messages newest first using an opaque cursor")
  public ApiResponse<History> history(@AuthenticationPrincipal Jwt jwt,@PathVariable UUID roomId,@RequestParam(required=false) String cursor,@RequestParam(defaultValue="30") int size) {

@@ -5,6 +5,13 @@ import org.springframework.data.domain.Pageable;
 import java.time.Instant;
 import java.util.*;
 public interface ChatMessageRepository extends JpaRepository<ChatMessage,UUID> {
+ @Query("""
+ select count(m) from ChatMessage m where m.roomId=:room and m.senderId<>:viewer
+ and m.removedAt is null and (:since is null or m.createdAt>=:since)
+ and not exists(select h.id from MessageHidden h where h.messageId=m.id and h.userId=:viewer)
+ and not exists(select r.id from MessageReceipt r where r.messageId=m.id and r.userId=:viewer and r.seenAt is not null)
+ """)
+ long unread(UUID room, UUID viewer, Instant since);
  @Query(value="select * from chat_messages where file_id=:fileId limit 1",nativeQuery=true)
  Optional<ChatMessage> includingDeletedByFileId(UUID fileId);
  @Query(value="select count(*) from chat_messages where file_id=:fileId and deleted_at is null and removed_at is null",nativeQuery=true)

@@ -16,6 +16,12 @@ public class ChatEventDelivery {
  private final ChatMessageRepository messages; private final ChatRoomRepository rooms;
  private final ChatMemberRepository members; private final UserRepository users;
  private final ChatService chat; private final SimpMessagingTemplate broker;
+ @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW)
+ public void deliver(RoomSettingsChanged changed) {
+  var room=chat.room(changed.userId(),changed.roomId());
+  broker.convertAndSendToUser(changed.userId().toString(),"/queue/chat-events",
+   new ChatEvent(java.util.UUID.randomUUID(),"ROOM_SETTINGS_UPDATED",changed.roomId(),ChatRoomType.valueOf(room.type()),null,room));
+ }
 
  @Transactional(readOnly=true,propagation=Propagation.REQUIRES_NEW)
  public void deliver(MessageCommitted committed) {

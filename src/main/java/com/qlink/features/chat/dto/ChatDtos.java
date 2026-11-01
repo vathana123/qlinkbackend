@@ -20,7 +20,9 @@ public final class ChatDtos {
  public record Message(UUID id, UUID roomId, UUID senderId, UUID clientMessageId, String type, String content, Instant createdAt, String senderDisplayName, UUID fileId, Long durationMs, String audioContentType, Long audioSizeBytes, Attachment attachment, UUID replyToId, Reply reply, Instant editedAt, Instant removedAt, long revision, boolean hidden, boolean canDeleteForEveryone, String delivery, int recipientCount, int deliveredCount, int seenCount, boolean forwarded, List<Reaction> reactions) {}
  public record Attachment(String originalName, String contentType, long sizeBytes) {}
  public record Room(UUID id, UUID creatorId, PublicUserResponse participant, Instant lastMessageAt, Message lastMessage, String type, String name, String avatarUrl, int memberCount, String messageHistoryVisibility,
- String description, String myRole, boolean membersCanSend, boolean membersCanInvite) {}
+ String description, String myRole, boolean membersCanSend, boolean membersCanInvite, boolean canSend,
+ boolean pinned, boolean archived, boolean muted, long unreadCount) {}
+ public record RoomSettings(Boolean pinned, Boolean archived) {}
  public record GroupUpdate(@NotBlank @Size(max=100) String name, @Size(max=2000) String description) {}
  public record GroupPermissions(boolean membersCanSend, boolean membersCanInvite) {}
  public record AddMembers(@NotEmpty @Size(max=199) List<@NotNull UUID> memberIds) {}
