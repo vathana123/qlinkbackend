@@ -12,4 +12,7 @@ public class ChatRoomMember extends BaseEntity { @Column(nullable=false,columnDe
  @Column(nullable=false,columnDefinition="binary(16)") private UUID userId;
  @Enumerated(EnumType.STRING) @Column(nullable=false,length=20)
  private ChatRoomMemberRole role = ChatRoomMemberRole.MEMBER;
- @Column(nullable=false) private Instant joinedAt; }
+ @Column(nullable=false) private Instant joinedAt;
+ @Column(nullable=false) private boolean pinned;
+ @Column(nullable=false) private boolean archived;
+}

@@ -11,6 +11,11 @@ public class ChatEventListener {
  private final com.qlink.features.storage.service.StorageCleanupService cleanup;
  private final ChatEventRecovery recovery;
  @TransactionalEventListener(phase=TransactionPhase.AFTER_COMMIT)
+ public void settingsChanged(RoomSettingsChanged event) {
+  try { delivery.deliver(event); }
+  catch(RuntimeException ex) { log.warn("Room settings event unavailable ({})",ex.getClass().getSimpleName()); }
+ }
+ @TransactionalEventListener(phase=TransactionPhase.AFTER_COMMIT)
  public void groupChanged(GroupChanged event) {
   try {delivery.deliver(event);}
   catch(RuntimeException ex) {log.warn("Group event unavailable ({})",ex.getClass().getSimpleName());}

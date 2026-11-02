@@ -5,10 +5,14 @@ import org.springframework.data.domain.*;
 import jakarta.persistence.LockModeType;
 import java.util.*;
 public interface UserRepository extends JpaRepository<User, UUID> {
+    @Modifying
+    @Query("update User u set u.lastSeenAt=:seen where u.id=:id and (u.lastSeenAt is null or u.lastSeenAt<:seen)")
+    int recordLastSeen(UUID id, java.time.Instant seen);
     @Query(value = "SELECT COUNT(*) FROM users WHERE avatar_file_id = :id", nativeQuery = true)
     long avatarReferences(UUID id);
     @Query("""
  select u from User u where u.id <> :viewer and u.status = com.qlink.features.user.enums.UserStatus.ACTIVE
+ and not exists (select b.id from UserBlock b where (b.blockerId=:viewer and b.blockedId=u.id) or (b.blockerId=u.id and b.blockedId=:viewer))
  and (:target is null or u.id = :target) and exists (
  select m.id from ChatRoomMember m, ChatRoomMember mine, ChatRoom r
  where m.userId=u.id and mine.userId=:viewer and m.roomId=mine.roomId and r.id=m.roomId
@@ -22,6 +26,7 @@ public interface UserRepository extends JpaRepository<User, UUID> {
     @Query("""
         select u from User u
         where u.id <> :viewer and u.status = com.qlink.features.user.enums.UserStatus.ACTIVE
+        and not exists (select b.id from UserBlock b where (b.blockerId=:viewer and b.blockedId=u.id) or (b.blockerId=u.id and b.blockedId=:viewer))
         and ((:pattern is not null and (lower(u.displayName) like :pattern escape '!' or lower(u.username) like :pattern escape '!'))
           or (:email is not null and lower(trim(u.email)) = :email)
           or (:phone is not null and u.phoneNumber = :phone))

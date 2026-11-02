@@ -10,6 +10,11 @@ import org.hibernate.annotations.SQLRestriction;
 @SQLRestriction("deleted_at IS NULL")
 @Getter @Setter @NoArgsConstructor
 public class User extends BaseEntity {
+    private java.time.Instant lastSeenAt;
+    @Enumerated(EnumType.STRING) @Column(nullable=false,length=16)
+    private com.qlink.features.user.enums.PresenceVisibility onlineVisibility=com.qlink.features.user.enums.PresenceVisibility.CONTACTS;
+    @Enumerated(EnumType.STRING) @Column(nullable=false,length=16)
+    private com.qlink.features.user.enums.PresenceVisibility lastSeenVisibility=com.qlink.features.user.enums.PresenceVisibility.CONTACTS;
     @Column(length = 255) private String displayName;
     @Column(length = 30) private String username;
     @Column(length = 320) private String email;

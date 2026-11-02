@@ -46,6 +46,7 @@ public class PushService {
  @Transactional(readOnly=true) public boolean muted(UUID actor,UUID room){membership(actor,room);return mutedInternal(actor,room);}
  private boolean mutedInternal(UUID actor,UUID room){return preferences.findByRoomIdAndUserId(room,actor).map(RoomNotificationPreference::isMuted).orElse(false);}
  @Transactional public void mute(UUID actor,UUID room,boolean muted) {
+  rooms.lockById(room).orElseThrow(this::denied);
   membership(actor,room);var p=preferences.findByRoomIdAndUserId(room,actor).orElseGet(RoomNotificationPreference::new);
   p.setRoomId(room);p.setUserId(actor);p.setMuted(muted);preferences.save(p);
  }

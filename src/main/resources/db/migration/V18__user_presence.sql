@@ -1,0 +1,1 @@
+ALTER TABLE users ADD COLUMN last_seen_at TIMESTAMP(6) NULL;

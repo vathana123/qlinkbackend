@@ -37,6 +37,7 @@ public class ChatService {
     private final MessageReceiptRepository receipts;
     private final ChatEventJobRepository eventJobs;
     private final PushService push;
+    private final PrivacyPolicy privacy;
     private final ChatRoomRepository rooms;
     private final ChatMemberRepository members;
     private final ChatMessageRepository messages;
@@ -52,7 +53,8 @@ public class ChatService {
     public ChatService(ChatRoomRepository rooms, ChatMemberRepository members, ChatMessageRepository messages,
                        UserRepository users, UserService current, DiscoveryService discovery, UserMapper userMapper,
                        ChatMapper mapper, VoiceFiles voiceFiles, PlatformTransactionManager transactions, ApplicationEventPublisher events,
-                       MessageHiddenRepository hidden, MessageReceiptRepository receipts, ChatEventJobRepository eventJobs, PushService push) {
+                       MessageHiddenRepository hidden, MessageReceiptRepository receipts, ChatEventJobRepository eventJobs, PushService push, PrivacyPolicy privacy) {
+        this.privacy = privacy;
         this.hidden = hidden;
         this.receipts = receipts;
         this.eventJobs = eventJobs;
@@ -164,6 +166,7 @@ public class ChatService {
         if (!Set.of("👍", "❤️", "😂", "😮", "😢", "🙏").contains(request.emoji())) throw bad("Unsupported reaction");
         rooms.lockById(roomId).orElseThrow(() -> bad("Room unavailable"));
         var room = requireRoom(viewer, roomId);
+        if (room.getType()==ChatRoomType.PERSONAL) privacy.requireMessaging(viewer,partner(viewer,roomId));
         var message = visibleMessage(viewer, room, id);
         if (message.getRemovedAt()!=null || isHidden(viewer,id)) throw bad("Message unavailable");
         String sql = request.selected()
@@ -317,6 +320,7 @@ public class ChatService {
         users.lockById(viewer).orElseThrow(() -> bad("User unavailable"));
         rooms.lockById(roomId).orElseThrow(() -> bad("Room unavailable"));
         var room = requireRoom(viewer, roomId);
+        if (room.getType()==ChatRoomType.PERSONAL) privacy.requireMessaging(viewer,partner(viewer,roomId));
         var m = visibleMessage(viewer, room, id);
         if (room.getType() != ChatRoomType.PERSONAL && membership(viewer, roomId).getRole() == ChatRoomMemberRole.MEMBER && !room.isMembersCanSend())
             throw new ApiException(HttpStatus.FORBIDDEN, "GROUP_PERMISSION_DENIED", "Members cannot edit messages in this group");
@@ -370,10 +374,13 @@ public class ChatService {
         }
         var latest = messages.visibleLatest(room.getId(), viewer, historyStart(viewer, room), PageRequest.of(0, 1));
         Message last = latest.isEmpty() ? null : messageDto(viewer, latest.get(0));
-        return new Room(room.getId(), room.getCreatorId(), profile, room.getType() == ChatRoomType.PERSONAL ? room.getLastMessageAt() : (last == null ? null : last.createdAt()), last,
+        var member = membership(viewer, room.getId());
+        return new Room(room.getId(), room.getCreatorId(), profile, last == null ? null : last.createdAt(), last,
                 room.getType().name(), room.getGroupName(), room.getAvatarFileId() == null ? null : "/api/v1/storage/files/" + room.getAvatarFileId() + "/download",
                 members.findByRoomId(room.getId()).size(), room.getMessageHistoryVisibility().name(), room.getDescription(),
-                membership(viewer, room.getId()).getRole().name(), room.isMembersCanSend(), room.isMembersCanInvite());
+                membership(viewer, room.getId()).getRole().name(), room.isMembersCanSend(), room.isMembersCanInvite(),
+                room.getType()==ChatRoomType.PERSONAL ? privacy.canMessage(viewer,profile.id()) : room.isMembersCanSend() || member.getRole()!=ChatRoomMemberRole.MEMBER,
+                member.isPinned(), member.isArchived(), push.muted(viewer, room.getId()), messages.unread(room.getId(), viewer, historyStart(viewer, room)));
     }
 
     public Page<PublicUserResponse> contacts(UUID viewer, int page, int size) {
@@ -446,9 +453,31 @@ public class ChatService {
     }
 
     public Page<Room> list(UUID viewer, int page, int size) {
+        return list(viewer, page, size, null);
+    }
+
+    public Page<Room> list(UUID viewer, int page, int size, Boolean archived) {
         current.requireActive(viewer);
         page(page, size);
-        return rooms.rooms(viewer, PageRequest.of(page, size)).map(r -> roomDto(viewer, r));
+        return rooms.managedRooms(viewer, archived, PageRequest.of(page, size)).map(r -> roomDto(viewer, r));
+    }
+
+    @Transactional(isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
+    public Room settings(UUID viewer, UUID roomId, RoomSettings request) {
+        // Serialize the user's pin budget across different rooms, then membership changes.
+        users.lockById(viewer).orElseThrow(() -> bad("User unavailable"));
+        rooms.lockById(roomId).orElseThrow(() -> bad("Room unavailable"));
+        var room = requireRoom(viewer, roomId);
+        var member = membership(viewer, roomId);
+        if (request.pinned() != null) {
+            if (request.pinned() && !member.isPinned() && members.countByUserIdAndPinnedTrue(viewer) >= 5)
+                throw new ApiException(HttpStatus.CONFLICT, "PIN_LIMIT_REACHED", "You can pin up to five conversations");
+            member.setPinned(request.pinned());
+        }
+        if (request.archived() != null) member.setArchived(request.archived());
+        members.flush();
+        events.publishEvent(new com.qlink.features.chat.realtime.RoomSettingsChanged(viewer, roomId));
+        return roomDto(viewer, room);
     }
 
     public History history(UUID viewer, UUID roomId, String cursor, int size) {
@@ -576,6 +605,7 @@ public class ChatService {
                 throw conflict();
             return new Sent(roomDto(sender, room), messageDto(sender, message));
         }
+        privacy.requireMessaging(sender, other);
         if (room == null) {
             room = new ChatRoom();
             room.setCreatorId(sender);

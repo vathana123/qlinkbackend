@@ -88,6 +88,15 @@ $env:CORS_ALLOWED_ORIGINS = 'http://localhost:3000,http://localhost:5173'
 
 Unix/macOS: export the same variables and run ./gradlew bootRun. Use a dedicated database user in deployed environments.
 
+For Windows development with Firebase push enabled, keep `GOOGLE_APPLICATION_CREDENTIALS`
+(an absolute service-account file path), `FIREBASE_PROJECT_ID`, and `PUSH_ENABLED=true`
+in the Git-ignored `.env`, and start with `./scripts/run-dev.ps1` from PowerShell.
+The launcher supplies these settings to the Java process and checks that the credential
+file exists. Existing process environment variables take precedence. Spring's `.env`
+import alone does not supply the process environment used by Google Application Default
+Credentials. Keep the JSON under the ignored `secrets/` directory. For a direct IDE launch,
+set the same three environment variables in a local, unshared run configuration.
+
 | Variable | Default / purpose |
 |---|---|
 | DB_HOST / DB_PORT | localhost / 3306 |
